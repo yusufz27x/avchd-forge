@@ -20,7 +20,11 @@ shape are copied from real output.
 | `ffprobe/mkv_720p_lpcm_multi.json` | handcrafted | LPCM 96 kHz and 8-channel LPCM warnings, AAC warning, PGS at 720p |
 | `ffprobe/ffprobe_empty.json` | handcrafted | degenerate response (no streams, no format) |
 | `tsmuxer/detect_*.txt` | real | captured `tsMuxeR <file>` track-detection output (Track ID numbering, stream types, languages) |
+| `tools/*.txt` | real | captured `ffmpeg -encoders/-bsfs/-muxers/-version`, `ffprobe -version` and `tsMuxeR --version` output: the parsers in `tooling.py` are asserted against these |
 | `meta/*.meta` | golden | expected tsMuxeR meta-file output; update deliberately together with `meta.py` |
+
+`meta/plan_*.meta` are rendered from a whole `JobPlan` (`tests/plan_jobs.py`) rather
+than from a bare `MuxJob`, i.e. they are what the application really sends.
 
 Regenerate the real fixtures with `scripts/generate_test_fixtures.sh` and review
 the diff before committing: a changed fixture means the local ffmpeg version

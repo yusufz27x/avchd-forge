@@ -30,6 +30,7 @@ from avchdforge.process import CompletedRun  # noqa: E402
 FFPROBE_DATA = DATA_DIR / "ffprobe"
 META_DATA = DATA_DIR / "meta"
 TSMUXER_DATA = DATA_DIR / "tsmuxer"
+TOOLS_DATA = DATA_DIR / "tools"
 
 
 # --------------------------------------------------------------------------
@@ -173,7 +174,7 @@ def load_json(name: str) -> dict[str, Any]:
 def load_text(name: str) -> str:
     path = Path(name)
     if not path.is_absolute():
-        for base in (TSMUXER_DATA, META_DATA, DATA_DIR):
+        for base in (TSMUXER_DATA, META_DATA, TOOLS_DATA, DATA_DIR):
             candidate = base / name
             if candidate.exists():
                 path = candidate
