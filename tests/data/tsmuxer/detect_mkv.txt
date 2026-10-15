@@ -1,0 +1,28 @@
+tsMuxeR version 2.7.0. github.com/justdan96/tsMuxer
+Track ID:    1
+Stream type: H.264
+Stream ID:   V_MPEG4/ISO/AVC
+Stream info: Profile: High@4.1  Resolution: 1920:1080p  Frame rate: 23.976
+Stream lang: und
+
+Track ID:    2
+Stream type: AC3
+Stream ID:   A_AC3
+Stream info: Bitrate: 448Kbps Sample Rate: 48KHz Channels: 5.1
+Stream lang: eng
+
+Track ID:    3
+Stream type: AC3
+Stream ID:   A_AC3
+Stream info: Bitrate: 192Kbps Sample Rate: 48KHz Channels: 2
+Stream lang: jpn
+
+Track ID:    4
+Stream type: SRT
+Stream ID:   S_TEXT/UTF8
+Stream info: SRT text subtitles
+Stream lang: eng
+
+Duration: 00:00:04.003
+
+

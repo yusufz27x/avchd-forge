@@ -1,0 +1,16 @@
+tsMuxeR version 2.7.0. github.com/justdan96/tsMuxer
+Track ID:    256
+Stream type: H.264
+Stream ID:   V_MPEG4/ISO/AVC
+Stream info: Profile: High@4.1  Resolution: 1920:1080p  Frame rate: 23.976
+Stream lang: 
+
+Track ID:    257
+Stream type: DTS
+Stream ID:   A_DTS
+Stream info: Bitrate: 768Kbps  Sample Rate: 48KHz  Channels: 5.1
+Stream lang: 
+
+Duration: 00:00:02.919
+
+

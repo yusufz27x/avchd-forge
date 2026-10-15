@@ -1,0 +1,193 @@
+{
+  "streams": [
+    {
+      "index": 0,
+      "codec_name": "h264",
+      "codec_long_name": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+      "profile": "High",
+      "codec_type": "video",
+      "width": 1440,
+      "height": 1080,
+      "pix_fmt": "yuv420p",
+      "level": 51,
+      "field_order": "tt",
+      "r_frame_rate": "30000/1001",
+      "avg_frame_rate": "30000/1001",
+      "time_base": "1/1000",
+      "start_pts": 0,
+      "start_time": "0.000000",
+      "duration_ts": 2048000,
+      "duration": "102.400000",
+      "bit_rate": "30000000",
+      "nb_frames": "2456",
+      "disposition": {
+        "default": 1,
+        "dub": 0,
+        "original": 0,
+        "comment": 0,
+        "lyrics": 0,
+        "karaoke": 0,
+        "forced": 0,
+        "hearing_impaired": 0,
+        "visual_impaired": 0,
+        "clean_effects": 0,
+        "attached_pic": 0,
+        "timed_thumbnails": 0,
+        "non_diegetic": 0,
+        "captions": 0,
+        "descriptions": 0,
+        "metadata": 0,
+        "dependent": 0,
+        "still_image": 0,
+        "multilayer": 0
+      },
+      "tags": {
+        "language": "und"
+      }
+    },
+    {
+      "index": 1,
+      "codec_name": "ac3",
+      "codec_type": "audio",
+      "sample_rate": "48000",
+      "channels": 6,
+      "channel_layout": "5.1(side)",
+      "r_frame_rate": "0/0",
+      "avg_frame_rate": "0/0",
+      "duration": "102.400000",
+      "disposition": {
+        "default": 0,
+        "dub": 0,
+        "original": 0,
+        "comment": 0,
+        "lyrics": 0,
+        "karaoke": 0,
+        "forced": 0,
+        "hearing_impaired": 0,
+        "visual_impaired": 0,
+        "clean_effects": 0,
+        "attached_pic": 0,
+        "timed_thumbnails": 0,
+        "non_diegetic": 0,
+        "captions": 0,
+        "descriptions": 0,
+        "metadata": 0,
+        "dependent": 0,
+        "still_image": 0,
+        "multilayer": 0
+      },
+      "tags": {
+        "language": "eng"
+      },
+      "bit_rate": "448000"
+    },
+    {
+      "index": 2,
+      "codec_name": "hdmv_pgs_subtitle",
+      "codec_type": "subtitle",
+      "r_frame_rate": "0/0",
+      "avg_frame_rate": "0/0",
+      "disposition": {
+        "default": 0,
+        "dub": 0,
+        "original": 0,
+        "comment": 0,
+        "lyrics": 0,
+        "karaoke": 0,
+        "forced": 0,
+        "hearing_impaired": 0,
+        "visual_impaired": 0,
+        "clean_effects": 0,
+        "attached_pic": 0,
+        "timed_thumbnails": 0,
+        "non_diegetic": 0,
+        "captions": 0,
+        "descriptions": 0,
+        "metadata": 0,
+        "dependent": 0,
+        "still_image": 0,
+        "multilayer": 0
+      },
+      "tags": {
+        "language": "eng"
+      },
+      "width": 1920,
+      "height": 1080
+    },
+    {
+      "index": 3,
+      "codec_name": "dvd_subtitle",
+      "codec_type": "subtitle",
+      "r_frame_rate": "0/0",
+      "avg_frame_rate": "0/0",
+      "disposition": {
+        "default": 0,
+        "dub": 0,
+        "original": 0,
+        "comment": 0,
+        "lyrics": 0,
+        "karaoke": 0,
+        "forced": 0,
+        "hearing_impaired": 0,
+        "visual_impaired": 0,
+        "clean_effects": 0,
+        "attached_pic": 0,
+        "timed_thumbnails": 0,
+        "non_diegetic": 0,
+        "captions": 0,
+        "descriptions": 0,
+        "metadata": 0,
+        "dependent": 0,
+        "still_image": 0,
+        "multilayer": 0
+      },
+      "tags": {
+        "language": "eng"
+      }
+    },
+    {
+      "index": 4,
+      "codec_name": "hdmv_pgs_subtitle",
+      "codec_type": "subtitle",
+      "r_frame_rate": "0/0",
+      "avg_frame_rate": "0/0",
+      "disposition": {
+        "default": 1,
+        "dub": 0,
+        "original": 0,
+        "comment": 0,
+        "lyrics": 0,
+        "karaoke": 0,
+        "forced": 0,
+        "hearing_impaired": 0,
+        "visual_impaired": 0,
+        "clean_effects": 0,
+        "attached_pic": 0,
+        "timed_thumbnails": 0,
+        "non_diegetic": 0,
+        "captions": 0,
+        "descriptions": 0,
+        "metadata": 0,
+        "dependent": 0,
+        "still_image": 0,
+        "multilayer": 0
+      },
+      "tags": {
+        "language": "jpn"
+      },
+      "width": 2000,
+      "height": 1200
+    }
+  ],
+  "format": {
+    "filename": "mkv_1440x1080i_h264_level51.mkv",
+    "nb_streams": 5,
+    "format_name": "matroska,webm",
+    "format_long_name": "Matroska / WebM",
+    "start_time": "0.000000",
+    "duration": "102.400000",
+    "size": "120000000",
+    "bit_rate": "9375000"
+  },
+  "_fixture_note": "HANDCRAFTED rule-coverage fixture: 1440x1080 (illegal), interlaced, level 5.1, 30 Mbps, PGS oversized, VobSub (unsupported)."
+}

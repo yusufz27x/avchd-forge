@@ -1,0 +1,5 @@
+{
+  "streams": [],
+  "format": {},
+  "_fixture_note": "HANDCRAFTED: degenerate ffprobe response (no format, no streams)."
+}
