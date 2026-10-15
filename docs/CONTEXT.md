@@ -165,6 +165,8 @@ escaped paths **(verified)**.
 | D9 | 2026-10-15 | Extracted cores/`.srt` are written to temp and referenced as raw elementary streams (`track=0`, ignored by tsMuxeR) | removes the TS/MKV numbering question entirely for prepared tracks |
 | D10 | 2026-10-15 | A `JobPlan` is a pure function of media + selection + detection + options, and carries one expected codec family (and channel count) per stream of the finished disc | the post-mux check (D4) needs a machine-checkable expectation, and keeping the plan pure makes it unit-testable without running any tool |
 | D11 | 2026-10-15 | Split verification measures with `SPLIT_MB_BYTES = 10⁶` and fails a chunk only when it exceeds target + 32 MiB | tsMuxeR splits at keyframes and `MB` is decimal (§2.6); a hard `≤ target` assertion would fail on every real file |
+| D12 | 2026-10-15 | `execute_plan` takes an explicit `owns_temp` flag; `jobs.py` passes `True` for the `mkdtemp` directory it created, and a cancellation always keeps the temp dir even when failures are dropped | inferring ownership from "did the directory exist" is wrong for the GUI path (the job pre-creates it); keeping evidence on cancel is the documented temp policy |
+| D13 | 2026-10-15 | `JobRunner` runs on the GUI thread inside `QProcessRunner`'s nested event loop — no worker thread, no `moveToThread` | the nested loop keeps delivering input events, which is *why* Cancel works mid-mux; verified live: a timer that fired during the mux killed the child and surfaced as a cancellation with the temp dir kept |
 
 ## 4. Open items
 

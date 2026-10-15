@@ -549,9 +549,10 @@ def test_execute_plan_reports_cancellation(tmp_path: Path) -> None:
     )
 
     with pytest.raises(JobCancelled):
-        execute_plan(plan, runner)
+        execute_plan(plan, runner, keep_temp_on_failure=False)
 
-    # a cancelled job keeps its temp dir, but it is not an error
+    # a cancelled job keeps its temp dir, but it is not an error — even when the
+    # caller asked for failures not to be kept
     assert plan.meta_path.exists()
 
 

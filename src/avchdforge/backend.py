@@ -33,7 +33,9 @@ from .process import CompletedRun, LineCallback, ProgressCallback, Runner
 from .progress import FfmpegProgressScanner, TsmuxerScanner, is_mux_success
 from .tracks import codec_family
 
-StageKey = Literal["prepare", "mux", "verify", "cleanup"]
+#: Stages a job passes through. ``probe`` and ``plan`` are emitted by the Qt job
+#: layer (``jobs.py``) before this module starts working; the rest come from here.
+StageKey = Literal["probe", "plan", "prepare", "mux", "verify", "cleanup"]
 StageCallback = Callable[["JobStage"], None]
 
 #: The AVCHD tree tsMuxeR's ``--avchd`` mode writes (``docs/CONTEXT.md`` §2.1).
@@ -281,18 +283,24 @@ def execute_plan(
     on_stage: StageCallback | None = None,
     keep_temp_on_success: bool = False,
     keep_temp_on_failure: bool = True,
+    owns_temp: bool | None = None,
 ) -> JobOutcome:
     """Run the whole plan and return the verified result, or raise.
 
-    ``plan.temp_dir`` is expected to be a directory owned by this job (``jobs.py``
-    creates one per run with ``mkdtemp``). A shared, pre-existing directory is only
-    emptied of the files this job wrote, never deleted.
+    ``owns_temp`` says whether ``plan.temp_dir`` may be deleted outright. By
+    default it is inferred from whether the directory already existed, which is
+    right for callers that let this function create it; a caller that pre-created a
+    per-run directory (``jobs.py`` uses ``mkdtemp``) passes ``owns_temp=True``. A
+    shared, pre-existing directory is only emptied of the files this job wrote,
+    never deleted.
 
     On failure the temp directory is kept by default (event evidence), on success
-    it is removed unless ``keep_temp_on_success`` says otherwise. Either way the
-    caller decides; nothing is written outside ``temp_dir`` and ``output_dir``.
+    it is removed unless ``keep_temp_on_success`` says otherwise. Cancellation
+    always keeps it, whatever the failure policy says: a cancelled job is the one
+    case where the user still wants to see what happened. Either way the caller
+    decides; nothing is written outside ``temp_dir`` and ``output_dir``.
     """
-    temp_owned = not plan.temp_dir.exists()
+    temp_owned = (not plan.temp_dir.exists()) if owns_temp is None else owns_temp
     plan.temp_dir.mkdir(parents=True, exist_ok=True)
     total_units = len(plan.prep_steps) + 2  # every prep step, the mux, the verify
 
@@ -360,6 +368,10 @@ def execute_plan(
             details=report.details,
             temp_dir_kept=temp_kept,
         )
+    except JobCancelled:
+        # Not an error and never cleaned up: a cancelled job is the one case where
+        # the user still wants the evidence, whatever keep_temp_on_failure says.
+        raise
     except BaseException:
         if not keep_temp_on_failure:
             _clean_temp(plan, owned=temp_owned)
