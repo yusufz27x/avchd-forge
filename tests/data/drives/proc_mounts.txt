@@ -1,0 +1,9 @@
+sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0
+proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+udev /dev devtmpfs rw,nosuid,relatime,size=7748112k,nr_inodes=1937028,mode=755 0 0
+/dev/mapper/ipg3--vg-root / ext4 rw,relatime,errors=remount-ro 0 0
+tmpfs /dev/shm tmpfs rw,nosuid,nodev,inode64 0 0
+/dev/sda2 /boot ext2 rw,relatime 0 0
+/dev/sdb1 /media/user/My\040Movies vfat rw,nosuid,nodev,relatime,uid=1000,gid=1000 0 0
+/dev/sdc1 /media/user/Intenso exfat rw,nosuid,nodev,relatime,uid=1000,gid=1000 0 0
+/dev/sdb1 /media/user/PS3USB vfat rw,nosuid,nodev,relatime,uid=1000,gid=1000 0 0

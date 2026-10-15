@@ -1,0 +1,87 @@
+{
+   "blockdevices": [
+      {
+         "name": "sda",
+         "mountpoint": null,
+         "fstype": null,
+         "label": null,
+         "rm": false,
+         "size": "447.1G",
+         "model": "Netac SSD 480GB",
+         "uuid": null,
+         "children": [
+            {
+               "name": "sda1",
+               "mountpoint": "/",
+               "fstype": "ext4",
+               "label": null,
+               "rm": false,
+               "size": "447.1G",
+               "model": null,
+               "uuid": "d0be4372-77b3-485f-a5da-fa7e60f46156"
+            }
+         ]
+      },{
+         "name": "sdb",
+         "mountpoint": null,
+         "fstype": null,
+         "label": null,
+         "rm": true,
+         "size": "29.7G",
+         "model": "SanDisk Ultra USB 3.0",
+         "uuid": null,
+         "children": [
+            {
+               "name": "sdb1",
+               "mountpoint": "/media/user/PS3USB",
+               "fstype": "vfat",
+               "label": "PS3USB",
+               "rm": false,
+               "size": "29.7G",
+               "model": null,
+               "uuid": "1A2B-3C4D"
+            }
+         ]
+      },{
+         "name": "sdc",
+         "mountpoint": null,
+         "fstype": null,
+         "label": null,
+         "rm": false,
+         "size": "4.5T",
+         "model": "WDC WD50NPZZ-00A9JT0",
+         "uuid": null,
+         "children": [
+            {
+               "name": "sdc1",
+               "mountpoint": "/media/user/Intenso",
+               "fstype": "exfat",
+               "label": "Intenso",
+               "rm": false,
+               "size": "4.5T",
+               "model": null,
+               "uuid": "EFDD-5250"
+            },
+            {
+               "name": "sdc2",
+               "mountpoint": null,
+               "fstype": "ntfs",
+               "label": "Scratch",
+               "rm": false,
+               "size": "512G",
+               "model": null,
+               "uuid": "A1B2C3D4E5F60718"
+            }
+         ]
+      },{
+         "name": "loop0",
+         "mountpoint": "/snap/core22/1612",
+         "fstype": "squashfs",
+         "label": null,
+         "rm": false,
+         "size": "73.6M",
+         "model": null,
+         "uuid": null
+      }
+   ]
+}

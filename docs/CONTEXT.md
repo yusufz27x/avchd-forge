@@ -150,6 +150,25 @@ escaped paths **(verified)**.
   with `keep_temp_on_success` the temp dir holds exactly the two prepared
   `sub-*.srt` files plus `tsmuxer-meta.txt`.
 
+### 2.7 What `lsblk` does and does not tell us
+
+Captured from util-linux 2.41.5 (`lsblk -J -o NAME,MOUNTPOINT,FSTYPE,LABEL,RM,SIZE,MODEL,UUID`),
+shape preserved in `tests/data/drives/lsblk.json` **(verified)**:
+
+* Partitions are nested under their disk (`children`); `model` and the `rm`
+  (*removable*) flag appear on the **parent** only, so `drives.py` inherits both
+  down the tree — a partition of a USB stick is on a removable device by
+  definition.
+* Unmounted partitions have `mountpoint: null` and must be skipped: there is no
+  directory to write into. Swap is not unmounted but "mounted" at `[SWAP]`, also
+  skipped.
+* Sizes are human strings (`"447.1G"`) in **binary** powers (G = GiB); `-b` would
+  print bytes. The lists also carry snap/ISO loop devices (`squashfs`), which are
+  skipped by name prefix and fstype.
+* `lsblk` only knows *block devices*: a `tmpfs` (`/tmp`, `/run`) is invisible, so
+  `assess_target` may name a block-device mount while `shutil.disk_usage` reports
+  the tmpfs's free space. The free-space figure is the authoritative one for V16.
+
 ## 3. Decision log
 
 | # | Date | Decision | Why |
@@ -167,6 +186,7 @@ escaped paths **(verified)**.
 | D11 | 2026-10-15 | Split verification measures with `SPLIT_MB_BYTES = 10⁶` and fails a chunk only when it exceeds target + 32 MiB | tsMuxeR splits at keyframes and `MB` is decimal (§2.6); a hard `≤ target` assertion would fail on every real file |
 | D12 | 2026-10-15 | `execute_plan` takes an explicit `owns_temp` flag; `jobs.py` passes `True` for the `mkdtemp` directory it created, and a cancellation always keeps the temp dir even when failures are dropped | inferring ownership from "did the directory exist" is wrong for the GUI path (the job pre-creates it); keeping evidence on cancel is the documented temp policy |
 | D13 | 2026-10-15 | `JobRunner` runs on the GUI thread inside `QProcessRunner`'s nested event loop — no worker thread, no `moveToThread` | the nested loop keeps delivering input events, which is *why* Cancel works mid-mux; verified live: a timer that fired during the mux killed the child and surfaced as a cancellation with the temp dir kept |
+| D14 | 2026-10-15 | Drives come from `lsblk -J` (identity, label, removable, model, size) with `/proc/mounts` as the fallback; a partition inherits its disk's `rm`/`model`; `MB`-style sizes are binary (lsblk `G` = GiB) | `/proc/mounts` alone cannot tell a USB stick from an internal disk, and lsblk reports `rm`/`model` only on the parent device; verified against util-linux 2.41.5 (`sha256` of the shape in `tests/data/drives/lsblk.json`) |
 
 ## 4. Open items
 

@@ -34,6 +34,7 @@ releases into a **PS3-compatible AVCHD `BDMV/` folder structure** on an external
 src/avchdforge/     application package (src layout)
   constants.py      codec/level/resolution tables, thresholds, default sizes
   errors.py         exception hierarchy
+  validate_types.py Issue/ValidationReport (no imports beyond constants)
   probe.py          ffprobe JSON -> MediaInfo/VideoTrack/AudioTrack/SubtitleTrack
   audio.py          per-track verdict: copy, extract core, or refuse
   selection.py      which tracks the user picked + smart defaults
@@ -47,6 +48,7 @@ src/avchdforge/     application package (src layout)
   process.py        Runner protocol, SubprocessRunner, QProcessRunner
   progress.py       progress-line parsers (tsMuxeR, ffmpeg -progress)
   backend.py        executes a JobPlan, verifies the AVCHD/BDAV output layout
+  jobs.py           Qt orchestration: signals, cancel, temp-file policy
   drives.py         removable-drive + filesystem detection
   settings.py       QSettings wrapper
   ui/               main_window.py, track_view.py, log_pane.py, preferences.py, ...
