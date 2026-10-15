@@ -1,8 +1,11 @@
-# Runtime dependency of avchd-forge.
+# Runtime dependencies of avchd-forge (Python 3.10+).
+#
+#   pip install -r requirements.txt      # runtime only
+#   pip install -e ".[dev]"              # development (pytest, pytest-qt, ruff)
 #
 # External binaries are NOT installable via pip; avchd-forge checks for them at
 # startup and refuses to start when they are missing:
 #   - tsMuxeR   (https://github.com/justdan96/tsMuxer)  -> remux backend
-#   - ffmpeg    (>= 5.0 recommended)                     -> probe, cores, subtitles
-#   - ffprobe   (ships with ffmpeg)                      -> stream inspection
+#   - ffmpeg    (>= 5.0 recommended)                    -> probe, cores, subtitles
+#   - ffprobe   (ships with ffmpeg)                     -> stream inspection
 PySide6>=6.5
