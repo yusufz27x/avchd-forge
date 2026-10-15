@@ -1,0 +1,9 @@
+bitrate=   0.2kbits/s
+total_size=100
+out_time_us=3805000
+out_time_ms=3805000
+out_time=00:00:03.805000
+dup_frames=0
+drop_frames=0
+speed=3.43e+03x
+progress=end

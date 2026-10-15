@@ -20,7 +20,9 @@ shape are copied from real output.
 | `ffprobe/mkv_720p_lpcm_multi.json` | handcrafted | LPCM 96 kHz and 8-channel LPCM warnings, AAC warning, PGS at 720p |
 | `ffprobe/ffprobe_empty.json` | handcrafted | degenerate response (no streams, no format) |
 | `tsmuxer/detect_*.txt` | real | captured `tsMuxeR <file>` track-detection output (Track ID numbering, stream types, languages) |
+| `tsmuxer/mux_success.txt` | real | full stdout of a successful `tsMuxeR <meta> <out>` AVCHD mux: `N% complete` lines, frame counter, `Mux successful complete` sentinel — the parsers in `progress.py` are asserted against it |
 | `tools/*.txt` | real | captured `ffmpeg -encoders/-bsfs/-muxers/-version`, `ffprobe -version` and `tsMuxeR --version` output: the parsers in `tooling.py` are asserted against these |
+| `tools/ffmpeg_progress_subtitle.txt` | real | `ffmpeg -progress pipe:1 -nostats` blocks from an SRT conversion: the `FfmpegProgressScanner` fixture |
 | `meta/*.meta` | golden | expected tsMuxeR meta-file output; update deliberately together with `meta.py` |
 
 `meta/plan_*.meta` are rendered from a whole `JobPlan` (`tests/plan_jobs.py`) rather

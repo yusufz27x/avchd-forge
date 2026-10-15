@@ -1,0 +1,14 @@
+tsMuxeR version 2.7.0. github.com/justdan96/tsMuxer
+Decoding H264 stream (track 1): Profile: High@4.1  Resolution: 1920:1080p  Frame rate: 23.976
+B-pyramid level 1 detected. Shift DTS to 2 frames
+7.0% complete
+H264 bitstream changed: insert nal unit delimiters
+H264 bitstream changed: insert pict timing and buffering period SEI units
+Decoding AC3 stream (track 2): Bitrate: 448Kbps Sample Rate: 48KHz Channels: 5.1
+Processed 96 video frames
+100.0% complete
+Flushing write buffer
+Creating AVCHD stream info and seek index
+Creating AVCHD playlist
+Mux successful complete
+Muxing time: 0 sec
