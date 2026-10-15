@@ -57,6 +57,14 @@ class ProbeError(ToolExecutionError):
     """ffprobe could not read the input file."""
 
 
+class TrackMappingError(AvchdForgeError):
+    """ffprobe streams could not be matched to tsMuxeR Track IDs.
+
+    tsMuxeR exits 0 with wrong output (or segfaults) when a ``track=`` index is
+    wrong, so an unmappable stream is a hard failure rather than a guess.
+    """
+
+
 class ValidationFailed(AvchdForgeError):
     """Media or selection validation produced at least one error."""
 
@@ -136,6 +144,7 @@ __all__ = [
     "ProbeError",
     "ToolExecutionError",
     "ToolNotFoundError",
+    "TrackMappingError",
     "ValidationFailed",
     "VerificationError",
     "format_argv",
