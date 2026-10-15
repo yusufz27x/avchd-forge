@@ -81,6 +81,7 @@ AUDIO_CODEC_LABELS: Final[dict[str, str]] = {
     "truehd": "TrueHD",
     "mlp": "MLP",
     "aac": "AAC",
+    "lpcm": "LPCM",
     "mp3": "MP3",
     "flac": "FLAC",
     "opus": "Opus",

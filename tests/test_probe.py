@@ -19,8 +19,7 @@ from avchdforge.probe import (
     probe,
 )
 
-from .conftest import FakeRunner, FakeResponse, load_json
-
+from .conftest import FakeResponse, FakeRunner, load_json
 
 # --------------------------------------------------------------------------
 # argv contract
@@ -331,5 +330,5 @@ def test_probe_raises_probe_error_on_invalid_json():
 
 
 def test_parse_ffprobe_json_rejects_non_mapping():
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
         probe_module.parse_ffprobe_json(["not", "a", "mapping"])  # type: ignore[arg-type]

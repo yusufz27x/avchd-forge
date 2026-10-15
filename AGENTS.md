@@ -35,6 +35,8 @@ src/avchdforge/     application package (src layout)
   constants.py      codec/level/resolution tables, thresholds, default sizes
   errors.py         exception hierarchy
   probe.py          ffprobe JSON -> MediaInfo/VideoTrack/AudioTrack/SubtitleTrack
+  audio.py          per-track verdict: copy, extract core, or refuse
+  selection.py      which tracks the user picked + smart defaults
   validate.py       compatibility rules -> Issues (error/warning)
   meta.py           tsMuxeR meta-file generation (pure, golden-file tested)
   tracks.py         tsMuxeR detection run + ffprobe <-> track-id mapping

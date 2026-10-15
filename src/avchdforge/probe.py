@@ -13,7 +13,7 @@ tested against canned ffprobe JSON with no ffprobe binary in sight.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
@@ -29,7 +29,6 @@ from .constants import (
     PGS_SUBTITLE_CODECS,
     PROGRESSIVE_FIELD_ORDERS,
     TEXT_SUBTITLE_CODECS,
-    UNSUPPORTED_SUBTITLE_CODECS,
 )
 from .errors import ProbeError
 from .process import Runner
@@ -208,9 +207,7 @@ class AudioTrack:
             return True
         if self.codec == "dts" and self.profile:
             return any(marker in self.profile.upper() for marker in DTS_HD_PROFILE_MARKERS)
-        if self.codec == "eac3":
-            return True
-        return False
+        return self.codec == "eac3"
 
     @property
     def codec_label(self) -> str:
@@ -365,14 +362,6 @@ class MediaInfo:
 # ffprobe plumbing
 # --------------------------------------------------------------------------
 
-FFPROBE_ENTRIES: Sequence[str] = (
-    "stream=index,codec_name,codec_long_name,profile,codec_type,width,height,pix_fmt,"
-    "level,r_frame_rate,avg_frame_rate,time_base,start_time,duration,bit_rate,"
-    "channels,channel_layout,sample_rate,field_order,disposition,tags",
-    "format=filename,format_name,format_long_name,start_time,duration,size,bit_rate,tags",
-)
-
-
 def build_ffprobe_argv(tool: str, path: Path | str) -> list[str]:
     """argv for a JSON probe of ``path``. Pure function, asserted by tests."""
     return [
@@ -395,7 +384,7 @@ def parse_ffprobe_json(payload: Mapping[str, Any], path: Path | str | None = Non
     the streams we care about are modelled, the raw payload is kept for logging.
     """
     if not isinstance(payload, Mapping):  # pragma: no cover - defensive
-        raise ValueError("ffprobe payload must be a JSON object")
+        raise TypeError("ffprobe payload must be a JSON object")
 
     format_info = payload.get("format") or {}
     if not isinstance(format_info, Mapping):  # pragma: no cover - defensive

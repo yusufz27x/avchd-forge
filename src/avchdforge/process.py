@@ -173,7 +173,7 @@ class SubprocessRunner:
         )
 
     @staticmethod
-    def _pump(stream, name: str, handle: Callable[[str, str], None]) -> None:  # noqa: ANN001
+    def _pump(stream, name: str, handle: Callable[[str, str], None]) -> None:
         if stream is None:  # pragma: no cover - defensive
             return
         try:

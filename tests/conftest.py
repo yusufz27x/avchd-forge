@@ -181,6 +181,78 @@ def load_text(name: str) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
+def build_media(
+    streams: list[dict[str, Any]] | None = None,
+    path: str = "movie.mkv",
+    **format_overrides: Any,
+) -> Any:
+    """Build a :class:`MediaInfo` from inline ffprobe-shaped stream dicts."""
+    from avchdforge.probe import parse_ffprobe_json
+
+    format_info = {
+        "filename": path,
+        "format_name": "matroska,webm",
+        "format_long_name": "Matroska / WebM",
+        "duration": "100.000000",
+        "size": "1000000",
+        "bit_rate": "80000",
+    }
+    format_info.update(format_overrides)
+    return parse_ffprobe_json({"streams": streams or [], "format": format_info}, path)
+
+
+def vstream(index: int = 0, codec: str = "h264", **overrides: Any) -> dict[str, Any]:
+    """Minimal ffprobe-shaped video stream (overridable per test)."""
+    stream: dict[str, Any] = {
+        "index": index,
+        "codec_type": "video",
+        "codec_name": codec,
+        "width": 1920,
+        "height": 1080,
+        "pix_fmt": "yuv420p",
+        "level": 41,
+        "profile": "High",
+        "field_order": "progressive",
+        "avg_frame_rate": "24000/1001",
+        "r_frame_rate": "24000/1001",
+        "bit_rate": "9000000",
+        "disposition": {},
+        "tags": {"language": "und"},
+    }
+    stream.update(overrides)
+    return stream
+
+
+def astream(index: int = 1, codec: str = "ac3", **overrides: Any) -> dict[str, Any]:
+    """Minimal ffprobe-shaped audio stream (overridable per test)."""
+    stream: dict[str, Any] = {
+        "index": index,
+        "codec_type": "audio",
+        "codec_name": codec,
+        "channels": 6,
+        "channel_layout": "5.1(side)",
+        "sample_rate": "48000",
+        "bit_rate": "448000",
+        "disposition": {},
+        "tags": {"language": "eng"},
+    }
+    stream.update(overrides)
+    return stream
+
+
+def sstream(index: int = 2, codec: str = "hdmv_pgs_subtitle", **overrides: Any) -> dict[str, Any]:
+    """Minimal ffprobe-shaped subtitle stream (overridable per test)."""
+    stream: dict[str, Any] = {
+        "index": index,
+        "codec_type": "subtitle",
+        "codec_name": codec,
+        "disposition": {},
+        "tags": {"language": "eng"},
+    }
+    stream.update(overrides)
+    return stream
+
+
 @pytest.fixture()
 def fixture_json() -> Callable[[str], dict[str, Any]]:
     return load_json
