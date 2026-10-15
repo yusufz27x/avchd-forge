@@ -82,8 +82,12 @@ S_HDMV/PGS, "/tmp/avchd-forge-xyz/subs/sub-0.sup", track=0, lang=eng
 
 * Paths are emitted with `/` separators, double quotes escaped, always quoted.
 * `--split-size=<N>M` present only when FAT32 splitting is enabled (default 4096).
-* Extracted core tracks reference the temp file with `track=0`, so no index
-  ambiguity with tsMuxeR's own track numbering.
+* **Track ids are resolved before the meta is written** (D7/D8): `meta.py` takes a
+  finished `track_id` per track and never computes one. Container tracks get the
+  `Track ID:` reported by a mandatory `tsMuxeR <source>` detection run
+  (`tracks.py`), matched to the ffprobe streams by media type + ordinal, with codec
+  classes verified; extracted cores, `.srt` and `.sup` files are raw elementary
+  streams referenced as `track=0` (tsMuxeR ignores the parameter there).
 * Text subtitles selected for conversion are emitted as `S_TEXT/UTF8` with the
   font options tsMuxeR needs to render PGS itself (`font-name`, `font-size`,
   `bottom-offset`, `font-color`), or as an ffmpeg-produced `.sup` when the local
@@ -206,14 +210,15 @@ removable flag, size, model), falls back to `/proc/mounts` when `lsblk` is absen
 7. `feat(subs): subtitle conversion argv with PGS-capability fallback`
 8. `feat(process): Runner protocol, subprocess runner and progress parsers`
 9. `feat(tools): tool discovery, version and capability probing`
-10. `feat(backend): execute plans and verify the AVCHD output tree`
-11. `feat(jobs): Qt job orchestration with cancel and temp-file policy`
-12. `feat(settings): QSettings-backed preferences`
-13. `feat(drives): removable drive and FAT32 detection`
-14. `feat(ui): main window, track panes, collapsible log, drag-and-drop`
-15. `feat(ui): preferences dialog and startup tool gate`
-16. `docs: README, packaging metadata, requirements`
-17. `test(e2e): real tsMuxeR + ffmpeg smoke run on generated media`
+10. `feat(tracks): mandatory tsMuxeR detection run and ffprobe↔track-id mapping`
+11. `feat(backend): execute plans and verify the AVCHD output tree`
+12. `feat(jobs): Qt job orchestration with cancel and temp-file policy`
+13. `feat(settings): QSettings-backed preferences`
+14. `feat(drives): removable drive and FAT32 detection`
+15. `feat(ui): main window, track panes, collapsible log, drag-and-drop`
+16. `feat(ui): preferences dialog and startup tool gate`
+17. `docs: README, packaging metadata, requirements`
+18. `test(e2e): real tsMuxeR + ffmpeg smoke run on generated media`
 
 ## 3. Verification strategy
 
@@ -251,7 +256,8 @@ removable flag, size, model), falls back to `/proc/mounts` when `lsblk` is absen
 
 | Risk | Mitigation |
 | --- | --- |
-| tsMuxeR `track=N` numbering differs from ffprobe's stream index | verified empirically in the e2e step; extracted cores always use `track=0`, and passthrough indices are confirmed against a real mux |
+| tsMuxeR `track=N` numbering differs from ffprobe's stream index (MKV: N=index+1; MPEG-TS: N=PID; raw files: ignored) | resolved by D7/D8: mandatory `tracks.py` detection run, ordinal+codec-class matching, hard error on ambiguity; extracted cores always use raw-stream `track=0`; validated in the e2e step for both MKV and TS |
+| tsMuxeR fails silently or crashes on bad input (phantom track, exit 0 with 0 frames, exit 139 on TS index) | post-mux composition verification (D4) plus preflight detection; both covered by unit tests using captured output |
 | tsMuxeR version output differs between 2.6.x/2.7.x | parsers tolerate both (`% complete` and `N/M packets`), verified against captured output |
 | AVCHD strictness vs. PS3 leniency (AAC, level 4.2, 24 Mbps) | implemented as warnings, never silent failures; documented in README |
 | `lsblk` unavailable (non-Linux) | fallback path + manual warning text; documented as Linux-first |

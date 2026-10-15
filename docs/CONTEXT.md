@@ -33,12 +33,22 @@ High@4.1 + two AC-3 tracks + a small SRT); `scratch/` holds throwaway mux output
 * `--split-size` accepts `KB/KiB/MB/MiB/GB/GiB`; `--split-size=1MB` on a 2.5 MB
   source produced `00000.m2ts` + `00001.m2ts` **(verified)**. `4096MB` is used for
   FAT32 (4 GiB − 1 B per file, so 4096 MB leaves margin).
-* **`track=` is 1-based** over *all* streams of the container as tsMuxeR numbers
-  them (`Track ID:` in detection mode), i.e. `track = ffprobe_stream_index + 1`.
-  With video=ffprobe 0 and audio=ffprobe {1,2}, `track=2` selected the 6-channel
-  English AC-3 and `track=3` the 2-channel Japanese one **(verified)**.
-* For **raw elementary streams** (`.ac3`, `.dts`, `.sup`, `.srt`) `track=0` works
-  and is what we emit **(verified** for `.ac3` and `.sup`**)**.
+* **`track=` semantics depend on the input.** tsMuxeR's detection mode
+  (`tsMuxeR <file>`) prints a `Track ID:` for every stream it sees, and the meta
+  `track=` value must equal that number:
+
+  | Input | Detection `Track ID:` | Correct `track=` | Wrong value does |
+  | --- | --- | --- | --- |
+  | MKV | 1-based, in file order | `ffprobe_index + 1` | silently muxes a phantom 0-channel track |
+  | MPEG-TS / M2TS | the **PID** (e.g. 256, 257) | the PID | **segfaults** (exit 139) |
+  | raw elementary stream (`.ac3`, `.dts`, `.sup`, `.srt`) | no `Track ID:` line is printed | ignored | nothing — a bogus `track=7` still muxed correctly |
+
+  All four rows were reproduced on this machine. Consequences: we never compute
+  `track=` from the ffprobe index (verified only for MKV), we resolve it from a
+  mandatory detection run (`docs/CONTEXT.md` §3 D7/D8), and raw temp files are
+  always emitted with `track=0` for explicitness.
+* With (MKV) video=ffprobe 0 and audio=ffprobe {1,2}, `track=2` selected the
+  6-channel English AC-3 and `track=3` the 2-channel Japanese one **(verified)**.
 * Audio track options include `lang`, `timeshift=±Nms`, `down-to-dts` (strip DTS-HD
   from a DTS track) and `down-to-ac3` (strip HD part of TrueHD) — tsMuxeR can do
   core extraction natively; the brief mandates ffmpeg bitstream filters instead, so
@@ -64,6 +74,7 @@ output **(verified)**:
 | --- | --- |
 | `A_AC3 … track=9` (index does not exist) | no audio decoded; output `.m2ts` contains a **phantom `ac3` stream with 0 channels** |
 | `V_MPEG4/ISO/AVC … track=2` pointing at an AC-3 stream | `Processed 0 video frames`, still exits 0 and writes a tree |
+| `track=1`/`track=2` on an MPEG-TS input (i.e. sequential instead of PID) | **segmentation fault, exit 139**, no output written |
 
 Consequence (design requirement, not optional): after muxing we **ffprobe the
 produced `.m2ts` files and compare the stream composition against the plan**
@@ -112,8 +123,11 @@ escaped paths **(verified)**.
 | D2 | 2026-10-15 | TrueHD handling: embedded AC-3 core only, otherwise refuse | `truehd_core` semantics make the brief's assumption impossible; re-encoding is forbidden |
 | D3 | 2026-10-15 | Extracted cores are always written to temp files and referenced as `track=0` | removes 1-based/0-based index ambiguity and survives tsMuxeR's silent bad-index behaviour |
 | D4 | 2026-10-15 | Post-mux composition verification is mandatory | tsMuxeR exits 0 while producing wrong output (§2.2) |
-| D5 | 2026-10-15 | `track=` for container streams is `ffprobe_index + 1` | verified 1-based numbering |
+| D5 | 2026-10-15 | `track=` is never derived arithmetically from the ffprobe index | index+1 holds for MKV only; TS needs PIDs and wrong values either fake a track or segfault (§2.1) |
 | D6 | 2026-10-15 | Core logic stays Qt-free behind a `Runner` protocol | tests need no Qt, no processes; only the GUI path uses `QProcess` |
+| D7 | 2026-10-15 | A tsMuxeR **detection run on the source is a mandatory preflight**; its `Track ID:` values are the `track=` numbers | the only authority on how tsMuxeR numbers the input |
+| D8 | 2026-10-15 | Track resolution matches ffprobe streams to detection entries by media type + ordinal, then verifies codec classes; any ambiguity is a hard error | guessing wrong drops audio silently or crashes tsMuxeR |
+| D9 | 2026-10-15 | Extracted cores/`.srt` are written to temp and referenced as raw elementary streams (`track=0`, ignored by tsMuxeR) | removes the TS/MKV numbering question entirely for prepared tracks |
 
 ## 4. Open items
 

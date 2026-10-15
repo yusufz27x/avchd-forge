@@ -37,6 +37,7 @@ src/avchdforge/     application package (src layout)
   probe.py          ffprobe JSON -> MediaInfo/VideoTrack/AudioTrack/SubtitleTrack
   validate.py       compatibility rules -> Issues (error/warning)
   meta.py           tsMuxeR meta-file generation (pure, golden-file tested)
+  tracks.py         tsMuxeR detection run + ffprobe <-> track-id mapping
   plan.py           MediaInfo + user selection -> JobPlan (steps + meta text)
   prep.py           ffmpeg argv for audio-core extraction / subtitle conversion
   tooling.py        tool discovery, version + capability probing
