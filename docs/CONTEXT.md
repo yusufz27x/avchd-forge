@@ -169,6 +169,26 @@ shape preserved in `tests/data/drives/lsblk.json` **(verified)**:
   `assess_target` may name a block-device mount while `shutil.disk_usage` reports
   the tmpfs's free space. The free-space figure is the authoritative one for V16.
 
+### 2.8 The GUI path, live-verified
+
+`MainWindow` driven offscreen (`QT_QPA_PLATFORM=offscreen`,
+`AVCHD_FORGE_TSMUXER=/tmp/opencode/tsmuxer/linux/tsMuxeR`) through the real
+pipeline, on `e2e-src.mkv` (1080p H.264, 2×AC-3, 2×SubRip) **(verified)**:
+
+* `check_tools()` resolved tsMuxeR 2.7.0, ffmpeg and ffprobe 7.1.5-0+deb13u1;
+  `refresh_drives()` listed this machine's four mounted filesystems and the
+  output badge said `not FAT32 (EXT4)` with the V15 warning inline.
+* Default selection from the probe was `audio=(1,)`, subtitles empty (no PGS in
+  the source); Start was enabled only with a probe, an output folder and a
+  resolved toolchain.
+* Both SubRip tracks ticked in the window → the job ran ffmpeg SRT prep steps →
+  tsMuxeR → verification, and the produced `.m2ts` reports
+  `H264, AC3 6ch, AC3 2ch, HDMV_PGS_SUBTITLE, HDMV_PGS_SUBTITLE`.
+* A `QTimer.singleShot(250, window.cancel)` fired *during the ffmpeg prep step*
+  (nested event loop, D13) and surfaced as `Cancelled normalise SubRip to UTF-8
+  for tsMuxeR`, with the temp dir kept, nothing in the output dir, and Start
+  enabled again.
+
 ## 3. Decision log
 
 | # | Date | Decision | Why |
@@ -187,6 +207,9 @@ shape preserved in `tests/data/drives/lsblk.json` **(verified)**:
 | D12 | 2026-10-15 | `execute_plan` takes an explicit `owns_temp` flag; `jobs.py` passes `True` for the `mkdtemp` directory it created, and a cancellation always keeps the temp dir even when failures are dropped | inferring ownership from "did the directory exist" is wrong for the GUI path (the job pre-creates it); keeping evidence on cancel is the documented temp policy |
 | D13 | 2026-10-15 | `JobRunner` runs on the GUI thread inside `QProcessRunner`'s nested event loop — no worker thread, no `moveToThread` | the nested loop keeps delivering input events, which is *why* Cancel works mid-mux; verified live: a timer that fired during the mux killed the child and surfaced as a cancellation with the temp dir kept |
 | D14 | 2026-10-15 | Drives come from `lsblk -J` (identity, label, removable, model, size) with `/proc/mounts` as the fallback; a partition inherits its disk's `rm`/`model`; `MB`-style sizes are binary (lsblk `G` = GiB) | `/proc/mounts` alone cannot tell a USB stick from an internal disk, and lsblk reports `rm`/`model` only on the parent device; verified against util-linux 2.41.5 (`sha256` of the shape in `tests/data/drives/lsblk.json`) |
+| D15 | 2026-10-15 | A finished/failed/cancelled run is reported **in the run bar and the log pane only** — no modal dialog is ever opened from a job signal; modal dialogs exist only behind menu actions | a `QMessageBox` inside `QProcessRunner`'s nested event loop re-enters the event loop from within a job, and GUI tests cannot dismiss it; the full text is one tooltip away |
+| D16 | 2026-10-15 | The log pane is a collapsible, resizable `QSplitter` pane with its own `QToolButton`, not a `QDockWidget`; geometry, window state and log visibility persist via `AppSettings` | one collapse mechanism (the button the plan asks for) instead of two competing ones; `saveState()` stays wired in case real docks arrive later |
+| D17 | 2026-10-15 | Start is blocked only by missing tools, unusable media, no output folder or a read-only target; V15/V16 target warnings never block; the free-space estimate is `int(media.size_bytes * OUTPUT_OVERHEAD)` until a `JobPlan` exists | warnings must inform, not refuse (the brief), and the source size is the only estimate available before the plan is built; the mux re-packages the same streams, so the source size is the right ballpark |
 
 ## 4. Open items
 

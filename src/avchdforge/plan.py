@@ -490,6 +490,7 @@ def describe_plan(plan: JobPlan) -> list[str]:
 __all__ = [
     "FALLBACK_AUDIO_BITRATES",
     "META_FILE_NAME",
+    "OUTPUT_OVERHEAD",
     "JobPlan",
     "PlanOptions",
     "PlannedTrack",
