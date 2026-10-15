@@ -108,6 +108,23 @@ def test_values_are_coerced_whatever_the_backend_stored(prefs: AppSettings) -> N
     assert prefs.split_size_mb() == DEFAULT_SPLIT_SIZE_MB
 
 
+def test_the_stored_split_size_survives_splitting_being_off(prefs: AppSettings) -> None:
+    prefs.set_split_size_mb(2048)
+    prefs.set_split_enabled(False)
+
+    assert prefs.split_size_mb() is None  # what the mux will do
+    assert prefs.stored_split_size_mb() == 2048  # what Preferences has to keep
+
+    prefs.set_split_enabled(True)
+    assert prefs.split_size_mb() == 2048
+
+
+def test_a_broken_stored_split_size_falls_back_to_the_default(prefs: AppSettings) -> None:
+    prefs.set_value(SPLIT_SIZE_MB, "0")
+
+    assert prefs.stored_split_size_mb() == DEFAULT_SPLIT_SIZE_MB
+
+
 def test_window_state_round_trip(prefs: AppSettings) -> None:
     geometry = QtCore.QByteArray(b"geometry-bytes")
     state = QtCore.QByteArray(b"state-bytes")

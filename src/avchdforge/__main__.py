@@ -7,9 +7,14 @@ whole GUI scriptable (``avchd-forge movie.mkv --output /media/usb``) and gives
 1. ``QApplication`` first — every widget, every ``QSettings`` read and the
    offscreen platform plugin need it;
 2. the window, which restores its geometry from the preferences;
-3. the tool check, whose result the run bar needs before it can enable Start;
+3. the tool gate (:meth:`~avchdforge.ui.main_window.MainWindow.ensure_tools`) —
+   tsMuxeR/ffmpeg/ffprobe have to resolve before anything can be read or muxed,
+   and this is where the user may fix them or choose to quit;
 4. the drive list, so the picker knows what is mounted;
 5. only then the optional source, because probing is the one slow step.
+
+Quitting at the gate exits ``1``: nothing was done, and scripts that start the
+GUI should be able to tell that apart from a normal close.
 """
 
 from __future__ import annotations
@@ -21,6 +26,9 @@ from pathlib import Path
 from PySide6 import QtWidgets
 
 from .settings import APPLICATION, ORGANIZATION
+
+#: Exit code when the startup tool gate was quit (the window never opened).
+GATE_QUIT_EXIT_CODE = 1
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -67,7 +75,8 @@ def main(argv: list[str] | None = None) -> int:
     from .ui.main_window import MainWindow
 
     window = MainWindow()
-    window.check_tools()
+    if not window.ensure_tools():
+        return GATE_QUIT_EXIT_CODE
     window.refresh_drives()
     if args.output:
         window.set_output_dir(Path(args.output).expanduser())

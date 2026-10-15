@@ -19,13 +19,14 @@ pytest.importorskip("pytestqt", reason="the ui tests use pytest-qt")
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6 import QtCore
+from PySide6 import QtCore, QtWidgets
 
 from avchdforge.drives import Drive
 from avchdforge.selection import TrackSelection
 from avchdforge.settings import AppSettings, settings_for
 from avchdforge.tooling import FFMPEG, FFPROBE, TSMUXER, ToolInfo, ToolReport
 from avchdforge.ui.main_window import MainWindow, drop_accepts, dropped_file
+from avchdforge.ui.preferences import PreferencesDialog
 
 from .conftest import FakeResponse, FakeRunner, astream, load_json, vstream
 from .test_jobs import DETECTION, MUX_OK, PROBE_JSON_TEXT, fake_tree, output_payload
@@ -84,6 +85,19 @@ def write_source(tmp_path: Path, name: str = "source.mkv") -> Path:
 
 def script_probe(runner: FakeRunner) -> None:
     runner.add_stdout(PROBE_JSON_TEXT, match="ffprobe")
+
+
+def script_tool_answers(
+    runner: FakeRunner, *, times: int = 1, tsmuxer: str = "tsMuxeR version 2.7.0"
+) -> None:
+    """Everything ``check_toolchain`` asks of a resolved toolchain, ``times`` over."""
+    for _ in range(times):
+        runner.add_stdout(tsmuxer, match="tsMuxeR")
+        runner.add_stdout("ffmpeg version 7.1.5", match="-version")
+        runner.add_stdout("ffprobe version 7.1.5", match="-version")
+        runner.add_stdout(CAPABILITIES["-encoders"], match="-encoders")
+        runner.add_stdout(CAPABILITIES["-bsfs"], match="-bsfs")
+        runner.add_stdout(CAPABILITIES["-muxers"], match="-muxers")
 
 
 def script_success(runner: FakeRunner) -> None:
@@ -181,6 +195,125 @@ def test_check_tools_resolves_the_toolchain_and_reads_capabilities(tmp_path: Pat
     assert window.toolchain.tsmuxer == tmp_path / "tsMuxeR"
     assert window.toolchain.capabilities.eac3_core_supported
     assert "tsMuxeR 2.7.0" in window.log_pane.text()
+
+
+def test_a_tool_check_can_answer_without_adopting(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    script_tool_answers(runner)
+    window = make_window(tmp_path, runner)  # already has good tools
+    before = window.log_pane.text()
+    overrides = {name: make_executable(tmp_path / name) for name in (FFMPEG, FFPROBE)}
+    overrides[TSMUXER] = tmp_path / "elsewhere"
+
+    report = window.check_tools(overrides, adopt=False)
+
+    assert [tool.name for tool in report.missing] == [TSMUXER]  # the query answered ...
+    assert len(runner.calls) == 5  # ... with the three versions minus tsMuxeR, plus capabilities
+    assert window.tool_report is not None and window.tool_report.ok  # ... and changed nothing
+    assert window.toolchain is not None
+    assert window.log_pane.text() == before  # an unsaved path is not an event yet
+
+
+# --------------------------------------------------------------------------
+# preferences
+# --------------------------------------------------------------------------
+
+
+def test_changed_tool_paths_are_rechecked_and_adopted(tmp_path: Path, monkeypatch) -> None:
+    runner = FakeRunner()
+    script_tool_answers(runner)
+    window = make_window(tmp_path, runner)
+    settings = window._settings
+
+    def fake_exec(_dialog: PreferencesDialog) -> int:
+        for name in (TSMUXER, FFMPEG, FFPROBE):
+            settings.set_tool_path(name, make_executable(tmp_path / name))
+        return QtWidgets.QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(PreferencesDialog, "exec", fake_exec)
+
+    assert window.open_preferences() is True
+
+    assert window.toolchain is not None
+    assert window.toolchain.tsmuxer == tmp_path / "tsMuxeR"
+    assert "tsMuxeR 2.7.0" in window.log_pane.text()
+
+
+def test_cancelling_preferences_changes_nothing(tmp_path: Path, monkeypatch) -> None:
+    runner = FakeRunner()
+    window = make_window(tmp_path, runner)
+    settings = window._settings
+
+    def fake_exec(_dialog: PreferencesDialog) -> int:
+        settings.set_tool_path(TSMUXER, tmp_path / "elsewhere")
+        return QtWidgets.QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(PreferencesDialog, "exec", fake_exec)
+
+    assert window.open_preferences() is False
+
+    assert settings.tool_path(TSMUXER) is not None  # the dialog wrote it ...
+    assert runner.calls == []  # ... but no tool check ran, so nothing was adopted
+    assert window.toolchain is not None  # the old report still stands
+
+
+def test_a_language_priority_change_re_derives_the_track_defaults(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner = FakeRunner()
+    script_probe(runner)
+    window = make_window(tmp_path, runner)
+    window.open_source(write_source(tmp_path))
+    assert window.track_view.selection() == TrackSelection(audio=(1,))
+    settings = window._settings
+
+    def fake_exec(_dialog: PreferencesDialog) -> int:
+        settings.set_audio_priority("jpn")
+        return QtWidgets.QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(PreferencesDialog, "exec", fake_exec)
+
+    assert window.open_preferences() is True
+
+    assert window.track_view.selection() == TrackSelection(audio=(2,))
+    assert window.track_view.report.ok
+    assert "defaults re-derived" in window.log_pane.text()
+
+
+def test_a_split_change_re_assesses_the_target(tmp_path: Path, monkeypatch) -> None:
+    window, _runner, _source = prepared_window(tmp_path)
+    window.set_drives(
+        [Drive(device="/dev/sdb1", mountpoint=tmp_path, fstype="vfat", removable=True)]
+    )
+    settings = window._settings
+    assert window.output_warning.text() == ""
+
+    def fake_exec(_dialog: PreferencesDialog) -> int:
+        settings.set_split_enabled(False)
+        return QtWidgets.QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(PreferencesDialog, "exec", fake_exec)
+
+    window.open_preferences()
+
+    assert "Enable splitting" in window.output_warning.text()
+
+
+def test_the_menu_closes_while_a_job_runs(tmp_path: Path) -> None:
+    window, _runner, _source = prepared_window(tmp_path)
+    assert window.preferences_action.isEnabled()
+
+    window._set_busy(True)
+
+    assert not window.preferences_action.isEnabled()
+    assert not window.recheck_action.isEnabled()
+    assert not window.versions_action.isEnabled()
+    assert not window.open_action.isEnabled()
+
+    window._set_busy(False)
+
+    assert window.preferences_action.isEnabled()
+    assert window.open_action.isEnabled()
 
 
 # --------------------------------------------------------------------------

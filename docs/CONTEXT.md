@@ -189,6 +189,33 @@ pipeline, on `e2e-src.mkv` (1080p H.264, 2×AC-3, 2×SubRip) **(verified)**:
   for tsMuxeR`, with the temp dir kept, nothing in the output dir, and Start
   enabled again.
 
+### 2.9 Preferences and the startup gate, live-verified
+
+Step 16 driven offscreen against the real toolchain (tsMuxeR 2.7.0,
+ffmpeg/ffprobe 7.1.5-0+deb13u1) **(verified)**:
+
+* A missing `tsMuxeR` (override pointing at `/opt/nope/tsMuxeR`, with
+  `$AVCHD_FORGE_TSMUXER` unset — the env variable is an explicit override too and
+  would have won) gave `ok=False`, `missing=['tsMuxeR']`, Start disabled with
+  "External tools missing — Tools ▸ Preferences… can set their paths", and the
+  gate behaviour of D18: no *Continue*, *Re-check* as the default, *Quit* on Esc,
+  and `tsMuxeR:\n    /opt/nope/tsMuxeR (configured path)` in the details area.
+* Preferences' *Check now*, given the same real path typed into the box, ran the
+  six real queries through `QProcessRunner` and showed
+  `tsMuxeR 2.7.0 — /tmp/…/tsMuxeR` while the window's `toolchain` stayed `None`:
+  `check_tools(adopt=False)` answers without adopting (D19).
+* With `ffmpeg` pointed at the tsMuxeR binary the report came back `ok` **with a
+  warning** ("ffmpeg did not report a version"): the gate offered *Continue* and
+  `ensure_tools()` returned `True` once a timer clicked it.
+* A `QTimer`-driven accept of the Preferences dialog (splitting off, audio
+  priority `jpn`) was applied, the tools re-checked, and the target re-assessed
+  ("FAT32 splitting stays off").
+* The split spin's maximum is **4261 MB** (`(4 GiB − 32 MiB) ÷ 10⁶`), above the
+  4096 default. The first cut of the dialog used a literal 4095, which silently
+  clamped the default the moment the dialog was opened; the dialog now reads
+  `AppSettings.stored_split_size_mb()`, so a custom size also survives splitting
+  being switched off (D19).
+
 ## 3. Decision log
 
 | # | Date | Decision | Why |
@@ -210,6 +237,8 @@ pipeline, on `e2e-src.mkv` (1080p H.264, 2×AC-3, 2×SubRip) **(verified)**:
 | D15 | 2026-10-15 | A finished/failed/cancelled run is reported **in the run bar and the log pane only** — no modal dialog is ever opened from a job signal; modal dialogs exist only behind menu actions | a `QMessageBox` inside `QProcessRunner`'s nested event loop re-enters the event loop from within a job, and GUI tests cannot dismiss it; the full text is one tooltip away |
 | D16 | 2026-10-15 | The log pane is a collapsible, resizable `QSplitter` pane with its own `QToolButton`, not a `QDockWidget`; geometry, window state and log visibility persist via `AppSettings` | one collapse mechanism (the button the plan asks for) instead of two competing ones; `saveState()` stays wired in case real docks arrive later |
 | D17 | 2026-10-15 | Start is blocked only by missing tools, unusable media, no output folder or a read-only target; V15/V16 target warnings never block; the free-space estimate is `int(media.size_bytes * OUTPUT_OVERHEAD)` until a `JobPlan` exists | warnings must inform, not refuse (the brief), and the source size is the only estimate available before the plan is built; the mux re-packages the same streams, so the source size is the right ballpark |
+| D18 | 2026-10-15 | The startup gate is a `QMessageBox` that answers with a plain string (`recheck` / `preferences` / `continue` / `quit`); *Continue* exists **only** when the report is usable, the searched locations live in the details area, and anything that is not one of the buttons (Esc, the window manager) means *quit*; `main()` exits `1` when the gate is quit | a warned-but-working toolchain (old ffmpeg) must be continuable while a missing tsMuxeR must not, and guessing "continue" on a broken toolchain produces a half-written disc with no explanation; strings keep the loop drivable from `main()` and from tests without a modal event loop |
+| D19 | 2026-10-15 | Preferences edits *stored* state and never adopts it before OK: `MainWindow.check_tools(overrides, *, adopt=False)` answers without touching the window (so an unsaved typo cannot disable Start), and the split size is read/written as `AppSettings.stored_split_size_mb()` — independent of `split_enabled` — with the spin's maximum derived from `(FAT32_MAX_BYTES - SPLIT_OVERSHOOT_ALLOWANCE) // SPLIT_MB_BYTES` | an open dialog is not a decision yet; and editing the *effective* split size (which is `None` while splitting is off) reset a custom value to the default on every open-and-OK — the same reasoning as "V15/V16 inform, they do not block" |
 
 ## 4. Open items
 

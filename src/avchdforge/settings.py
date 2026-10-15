@@ -243,9 +243,19 @@ class AppSettings:
         self.set_value(SPLIT_ENABLED, enabled)
 
     def split_size_mb(self) -> int | None:
-        """The split size for FAT32, or ``None`` when splitting is switched off."""
+        """The split size the mux will use, or ``None`` when splitting is off."""
         if not self.split_enabled:
             return None
+        return self.stored_split_size_mb()
+
+    def stored_split_size_mb(self) -> int:
+        """The split target whether or not splitting is on.
+
+        The Preferences dialog edits this value while the size box is disabled
+        (splitting off), so it must read and write the stored number without
+        ``split_enabled`` turning it into ``None`` — otherwise merely opening and
+        closing the dialog would reset a custom size.
+        """
         return self._int(SPLIT_SIZE_MB, DEFAULT_SPLIT_SIZE_MB, minimum=1)
 
     def set_split_size_mb(self, value: int | None) -> None:

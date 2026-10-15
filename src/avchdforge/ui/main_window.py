@@ -12,18 +12,25 @@ Three deliberate choices worth remembering:
 
 * **No modal dialogs while working.** A finished, failed or cancelled run is
   reported in the run bar (one line, full text in the tooltip) and in the log
-  pane; only user-triggered menu actions open dialogs. Modal popups from inside
-  Qt's nested event loop (D13) would re-enter the event loop from within a job.
+  pane; only user-triggered menu actions open dialogs — and the startup tool gate
+  (:meth:`MainWindow.ensure_tools`), which runs before the window is shown and
+  before any job exists.
 * **The log is a collapsible bottom pane**, not a dock: its own toggle button
   already carries the state, and the splitter keeps it resizable.
 * **Target warnings never block.** ``assess_target`` warnings (V15/V16) are shown
   inline; only a read-only target or a missing toolchain actually disables Start.
+
+The window owns exactly one tool state: :meth:`check_tools` adopts a report (and
+with it the toolchain and Start's enabled-ness), while ``adopt=False`` answers the
+same question for the Preferences dialog without touching anything — an unsaved
+path in a dialog must not disable Start.
 """
 
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from functools import partial
 from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -51,6 +58,8 @@ from ..tooling import FFPROBE, ToolReport, check_toolchain
 from ..validate import validate_all
 from ..validate_types import ValidationReport
 from .log_pane import LogPane
+from .preferences import PreferencesDialog
+from .tool_gate import CONTINUE, PREFERENCES, QUIT, ToolGateDialog
 from .track_view import ERROR_COLOR, WARNING_COLOR, TrackView
 
 #: Badge colour for a FAT32 target (green), and for everything else.
@@ -267,6 +276,9 @@ class MainWindow(QtWidgets.QMainWindow):
         quit_action.triggered.connect(self.close)
 
         tools_menu = self.menuBar().addMenu("&Tools")
+        self.preferences_action = tools_menu.addAction("&Preferences…")
+        self.preferences_action.setShortcut(QtGui.QKeySequence.StandardKey.Preferences)
+        tools_menu.addSeparator()
         self.recheck_action = tools_menu.addAction("Re-check external tools")
         self.versions_action = tools_menu.addAction("Show tool versions…")
 
@@ -276,7 +288,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.open_action.triggered.connect(self.choose_source)
         self.open_output_action.triggered.connect(self.open_output_folder)
-        self.recheck_action.triggered.connect(self.check_tools)
+        # ``triggered`` carries a ``checked`` bool: never let it become the first
+        # argument of ``check_tools``/``open_preferences``.
+        self.preferences_action.triggered.connect(lambda _checked=False: self.open_preferences())
+        self.recheck_action.triggered.connect(lambda _checked=False: self.check_tools())
         self.versions_action.triggered.connect(self.show_tool_versions)
         about_action.triggered.connect(self.show_about)
         temp_action.triggered.connect(self.open_temp_dir)
@@ -305,18 +320,57 @@ class MainWindow(QtWidgets.QMainWindow):
     # tools and drives
     # ------------------------------------------------------------------
 
-    def check_tools(self) -> ToolReport:
-        """Locate tsMuxeR/ffmpeg/ffprobe and remember what was found."""
-        overrides = self._settings.tool_overrides()
+    def check_tools(
+        self,
+        overrides: Mapping[str, Path] | None = None,
+        *,
+        adopt: bool = True,
+    ) -> ToolReport:
+        """Locate tsMuxeR/ffmpeg/ffprobe, and (by default) adopt what was found.
+
+        ``overrides`` replaces the stored preferences for this one check: the
+        Preferences dialog's "Check now" passes the paths currently typed in, so a
+        typo is visible before anything is saved. ``adopt=False`` only answers the
+        question — Start keeps working off the *saved* report, because an unsaved
+        path in an open dialog is not a decision yet.
+        """
+        if overrides is None:
+            overrides = self._settings.tool_overrides()
+        report = self._query_tools(overrides)
+        if adopt:
+            self.set_tool_report(report)
+        return report
+
+    def _query_tools(self, overrides: Mapping[str, Path]) -> ToolReport:
+        """Run the tool check without changing the window's tool state."""
         runner = self._runner_factory()
         try:
-            report = check_toolchain(runner, overrides=overrides)
+            return check_toolchain(runner, overrides=overrides)
         except AvchdForgeError as exc:
-            # A broken ffmpeg capability query must not lose the tool report.
+            # A broken ffmpeg capability query must not swallow the tool report.
             self._on_line(f"[avchd-forge] capability probe failed: {exc}\n")
-            report = check_toolchain(runner, overrides=overrides, probe_capabilities=False)
-        self.set_tool_report(report)
-        return report
+            return check_toolchain(runner, overrides=overrides, probe_capabilities=False)
+
+    def ensure_tools(self) -> bool:
+        """The startup gate: check, offer a way out, say whether to keep going.
+
+        Returns ``False`` only when the user chose *Quit*. A usable-but-warned
+        report (an old version) is offered *Continue*, because continuing is a real
+        option there; a missing tool is not.
+        """
+        while True:
+            report = self.check_tools()
+            if report.ok and not report.warnings:
+                return True
+            choice = ToolGateDialog.ask(report, self)
+            if choice == CONTINUE:
+                return True
+            if choice == QUIT:
+                return False
+            if choice == PREFERENCES:
+                self.open_preferences(tab="tools")
+            # ``recheck`` — and anything else — loops back to the check, which is
+            # also what makes a repaired path take effect immediately.
 
     def set_tool_report(self, report: ToolReport) -> None:
         """Adopt a tool report (also the seam tests use instead of check_tools)."""
@@ -378,7 +432,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._job.busy:
             return False
         if self._toolchain is None:
-            self.notify("External tools are missing — cannot read the file")
+            self.notify("External tools are missing — set their paths in Tools ▸ Preferences…")
             return False
         if path is None:
             path = self.choose_source()
@@ -421,6 +475,17 @@ class MainWindow(QtWidgets.QMainWindow):
             audio_language_priority=self._settings.audio_priority(),
             subtitle_language_priority=self._settings.subtitle_priority(),
         )
+
+    def _reselect_defaults(self) -> None:
+        """Re-derive the checked tracks from the (possibly new) language priorities."""
+        if self._outcome is None:
+            return
+        selection = self._default_selection(self._outcome.media)
+        self._report = validate_all(self._outcome.media, selection)
+        self.track_view.set_media(self._outcome.media, selection, self._report)
+        self._update_actions()
+        self._update_status()
+        self._on_line("[avchd-forge] language priorities changed — defaults re-derived\n")
 
     # ------------------------------------------------------------------
     # output
@@ -705,11 +770,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.open_temp_button.setEnabled(self._temp_dir is not None)
         for widget in (self.open_button, self.browse_button, self.drive_combo):
             widget.setEnabled(not self._busy)
-        self.open_action.setEnabled(not self._busy)
+        # Modals are menu-only (D15), so the menu is what closes while a job runs.
+        for action in (
+            self.open_action,
+            self.preferences_action,
+            self.recheck_action,
+            self.versions_action,
+        ):
+            action.setEnabled(not self._busy)
 
     def _start_hint(self, usable: bool, output: bool, has_tools: bool) -> str:
         if not has_tools:
-            return "External tools missing — see Tools ▸ Show tool versions…"
+            return "External tools missing — set their paths in Tools ▸ Preferences…"
         if self._outcome is None:
             return "Open a media file first"
         if not usable:
@@ -755,6 +827,49 @@ class MainWindow(QtWidgets.QMainWindow):
     def open_temp_dir(self) -> None:
         if self._temp_dir is not None:
             _open_path(self._temp_dir, self)
+
+    def open_preferences(self, tab: str = "") -> bool:
+        """Edit the preferences, then redo whatever the changes made stale.
+
+        Returns whether OK was pressed. ``tab`` opens straight on one of the tabs
+        (the startup gate asks for ``"tools"``; the menu opens on the first). Three
+        preferences have visible consequences and are acted on here; everything
+        else is read when it is needed (``plan_options`` builds a fresh plan per
+        job):
+
+        * **tool paths** → re-check and adopt, because a changed path is usually
+          the repair of a missing tool;
+        * **language priorities** → re-derive the default selection, which is
+          exactly what a priority is for;
+        * **splitting** → re-assess the target, because the badge and the V15
+          warning depend on it.
+        """
+        before_tools = self._settings.tool_overrides()
+        before_languages = (
+            self._settings.audio_priority(),
+            self._settings.subtitle_priority(),
+        )
+        before_split = (self._settings.split_enabled, self._settings.stored_split_size_mb())
+        dialog = PreferencesDialog(
+            self._settings,
+            self,
+            tool_report=self._tool_report,
+            tool_check=partial(self.check_tools, adopt=False),
+            tab=tab,
+        )
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return False
+
+        if self._settings.tool_overrides() != before_tools:
+            self.check_tools()
+        if (
+            self._settings.audio_priority(),
+            self._settings.subtitle_priority(),
+        ) != before_languages:
+            self._reselect_defaults()
+        if (self._settings.split_enabled, self._settings.stored_split_size_mb()) != before_split:
+            self._assess_output()
+        return True
 
     def show_tool_versions(self) -> None:
         if self._tool_report is None:
