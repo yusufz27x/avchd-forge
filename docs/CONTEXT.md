@@ -133,8 +133,9 @@ escaped paths **(verified)**.
 | D5 | 2026-10-15 | `track=` is never derived arithmetically from the ffprobe index | index+1 holds for MKV only; TS needs PIDs and wrong values either fake a track or segfault (§2.1) |
 | D6 | 2026-10-15 | Core logic stays Qt-free behind a `Runner` protocol | tests need no Qt, no processes; only the GUI path uses `QProcess` |
 | D7 | 2026-10-15 | A tsMuxeR **detection run on the source is a mandatory preflight**; its `Track ID:` values are the `track=` numbers | the only authority on how tsMuxeR numbers the input |
-| D8 | 2026-10-15 | Track resolution matches ffprobe streams to detection entries by media type + ordinal, then verifies codec classes; any ambiguity is a hard error | guessing wrong drops audio silently or crashes tsMuxeR |
+| D8 | 2026-10-15 | Track resolution aligns ffprobe streams with detection entries per media kind, monotonic in file order, and only when the codec **family** matches (`A_AC3` covers AC-3/AC-3+/TrueHD, `pcm_*` counts as LPCM); anything unmapped is a hard error | guessing wrong drops audio silently or crashes tsMuxeR |
 | D9 | 2026-10-15 | Extracted cores/`.srt` are written to temp and referenced as raw elementary streams (`track=0`, ignored by tsMuxeR) | removes the TS/MKV numbering question entirely for prepared tracks |
+| D10 | 2026-10-15 | A `JobPlan` is a pure function of media + selection + detection + options, and carries one expected codec family (and channel count) per stream of the finished disc | the post-mux check (D4) needs a machine-checkable expectation, and keeping the plan pure makes it unit-testable without running any tool |
 
 ## 4. Open items
 

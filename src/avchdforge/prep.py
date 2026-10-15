@@ -44,7 +44,7 @@ class PrepStep:
     """One ffmpeg invocation that produces a file for the mux step."""
 
     kind: StepKind
-    #: ffprobe stream index this step consumes.
+    #: ffprobe stream index this step reads with ``-map``.
     source_index: int
     #: Human-readable one-liner for the log pane and the progress label.
     label: str
@@ -54,9 +54,18 @@ class PrepStep:
     expected_codec: str
     #: Codec tsMuxeR will be told about.
     mux_codec_tag: str
+    #: ffprobe index of the stream the *user selected*; differs from
+    #: ``source_index`` when the data comes from a companion stream, as with a
+    #: TrueHD track whose AC-3 core lives in its own stream.
+    selection_index: int | None = None
     language: str | None = None
     #: Set for subtitle steps that feed tsMuxeR's SRT renderer.
     text_subtitle: bool = False
+
+    @property
+    def selected_stream(self) -> int:
+        """Index in the user's selection that this step satisfies."""
+        return self.source_index if self.selection_index is None else self.selection_index
 
     @property
     def command_line(self) -> str:
@@ -181,6 +190,7 @@ def plan_prep_steps(
             PrepStep(
                 kind="audio-core",
                 source_index=decision.source_index,
+                selection_index=index,
                 label=f"{decision.note or 'extract audio core'} (stream {decision.source_index})",
                 argv=tuple(
                     build_audio_core_argv(
@@ -210,6 +220,7 @@ def plan_prep_steps(
                 PrepStep(
                     kind="subtitle-encode",
                     source_index=index,
+                    selection_index=index,
                     label=f"render {track.codec_label} to PGS (ffmpeg pgssub)",
                     argv=tuple(
                         build_subtitle_to_sup_argv(ffmpeg, media.path, index, output)
@@ -223,11 +234,17 @@ def plan_prep_steps(
             )
         else:
             output = temp_dir / temp_name("sub", index, ".srt")
+            label = (
+                "normalise SubRip to UTF-8 for tsMuxeR"
+                if track.codec in {"subrip", "srt"}
+                else f"convert {track.codec_label} to SubRip for tsMuxeR"
+            )
             steps.append(
                 PrepStep(
                     kind="subtitle-convert",
                     source_index=index,
-                    label=f"convert {track.codec_label} to SubRip for tsMuxeR",
+                    selection_index=index,
+                    label=label,
                     argv=tuple(
                         build_subtitle_to_srt_argv(ffmpeg, media.path, index, output)
                     ),

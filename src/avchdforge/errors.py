@@ -57,6 +57,14 @@ class ProbeError(ToolExecutionError):
     """ffprobe could not read the input file."""
 
 
+class PlanError(AvchdForgeError):
+    """A job plan cannot be built from the media, selection and detection run.
+
+    Reserved for broken invariants (validation runs first and turns user-facing
+    problems into a :class:`ValidationFailed`).
+    """
+
+
 class TrackMappingError(AvchdForgeError):
     """ffprobe streams could not be matched to tsMuxeR Track IDs.
 
@@ -140,6 +148,7 @@ __all__ = [
     "Issue",
     "JobCancelled",
     "MuxError",
+    "PlanError",
     "PrepError",
     "ProbeError",
     "ToolExecutionError",

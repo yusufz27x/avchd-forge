@@ -140,6 +140,11 @@ class TrackIdMap:
                 + f" ({detail}). Refusing to guess track numbers.",
             )
 
+    def require_one(self, ffprobe_index: int) -> int:
+        """The Track ID of one stream, refusing to guess when it is missing."""
+        self.require([ffprobe_index])
+        return self.ids[ffprobe_index]
+
     def __len__(self) -> int:
         return len(self.ids)
 
@@ -219,7 +224,7 @@ def detect_tracks(
 # --------------------------------------------------------------------------
 
 
-def _family_of(codec: str) -> str:
+def codec_family(codec: str) -> str:
     """Codec family of an ffprobe ``codec_name``.
 
     LPCM shows up under many names (``pcm_bluray``, ``pcm_s16le``…), so the
@@ -238,7 +243,7 @@ def _families_of_media(media: MediaInfo, kind: MediaKind) -> list[tuple[int, str
         streams = media.audio
     else:
         streams = media.subtitles
-    return [(stream.index, _family_of(stream.codec)) for stream in streams]  # type: ignore[attr-defined]
+    return [(stream.index, codec_family(stream.codec)) for stream in streams]  # type: ignore[attr-defined]
 
 
 def _align(ffprobe_families: list[str], detection_families: list[str]) -> list[int | None]:
@@ -315,6 +320,7 @@ __all__ = [
     "TrackIdMap",
     "TsmuxerTrack",
     "build_detect_argv",
+    "codec_family",
     "describe_detection",
     "detect_tracks",
     "parse_detect_output",

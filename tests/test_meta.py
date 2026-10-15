@@ -24,6 +24,7 @@ from avchdforge.meta import (
 )
 
 from .meta_jobs import JOBS, SOURCE, basic
+from .plan_jobs import JOBS as PLAN_JOBS
 
 GOLDEN = Path(__file__).resolve().parent / "data" / "meta"
 
@@ -49,8 +50,9 @@ def test_rendering_is_deterministic(name):
 
 
 def test_every_golden_file_has_a_job():
+    """Golden files come from a MuxJob or from a whole JobPlan (``plan_jobs``)."""
     golden_names = {path.stem for path in GOLDEN.glob("*.meta")}
-    assert golden_names == set(JOBS)
+    assert golden_names == set(JOBS) | set(PLAN_JOBS)
 
 
 # --------------------------------------------------------------------------

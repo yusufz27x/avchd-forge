@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """Regenerate the golden meta files in ``tests/data/meta``.
 
+Two families of files live there:
+
+* ``<name>.meta`` — rendered straight from a :class:`~avchdforge.meta.MuxJob`
+  (``tests/meta_jobs.py``);
+* ``<name>.meta`` for names in ``tests/plan_jobs.py`` — rendered from a complete
+  :class:`~avchdforge.plan.JobPlan`, which is what the application really sends
+  to tsMuxeR.
+
 Run after an intentional change to the meta format, then *read the diff* before
 committing: these files are the contract with tsMuxeR.
 
@@ -18,6 +26,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from avchdforge.meta import render_meta  # noqa: E402
 from meta_jobs import JOBS  # noqa: E402
+from plan_jobs import JOBS as PLAN_JOBS  # noqa: E402
 
 TARGET = ROOT / "tests" / "data" / "meta"
 
@@ -27,6 +36,10 @@ def main() -> int:
     for name, factory in JOBS.items():
         path = TARGET / f"{name}.meta"
         path.write_text(render_meta(factory()), encoding="utf-8", newline="\n")
+        print(f"wrote {path.relative_to(ROOT)}")
+    for name, factory in PLAN_JOBS.items():
+        path = TARGET / f"{name}.meta"
+        path.write_text(factory().meta_text, encoding="utf-8", newline="\n")
         print(f"wrote {path.relative_to(ROOT)}")
     return 0
 

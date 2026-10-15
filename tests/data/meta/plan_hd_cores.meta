@@ -1,0 +1,6 @@
+MUXOPT --avchd --no-pcr-on-video-pid --new-audio-pes --vbr --vbv-len=500 --split-size=4096MB
+V_MPEG4/ISO/AVC, "/media/BDRemux/My Movie (2019)/My Movie.mkv", insertSEI, contSPS, fps=23.976, track=1, lang=und
+A_DTS, /tmp/avchd-forge-abc123/audio-1.dts, track=0, lang=eng, timeshift=0ms
+A_AC3, /tmp/avchd-forge-abc123/audio-3.ac3, track=0, lang=fre, timeshift=0ms
+A_AC3, /tmp/avchd-forge-abc123/audio-5.ac3, track=0, lang=ger, timeshift=0ms
+S_TEXT/UTF8, /tmp/avchd-forge-abc123/sub-6.srt, track=0, lang=eng, video-width=1920, video-height=1080, fps=23.976, font-name="DejaVu Sans", font-size=65, font-color=0xEBFFFFFF, bottom-offset=24
