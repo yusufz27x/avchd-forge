@@ -1,0 +1,3 @@
+MUXOPT --avchd --no-pcr-on-video-pid --new-audio-pes --vbr --vbv-len=500 --split-size=4096MB
+V_MPEG4/ISO/AVC, "/media/My Movies/日本語 \"quoted\" release.mkv", insertSEI, contSPS, fps=29.97, track=1, lang=jpn
+A_AAC, "/media/My Movies/日本語 \"quoted\" release.mkv", track=2, lang=jpn

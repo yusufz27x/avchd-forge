@@ -1,0 +1,3 @@
+MUXOPT --avchd --no-pcr-on-video-pid --new-audio-pes --vbr --vbv-len=500 --split-size=4096MB --custom-chapters=00:00:00.000;00:10:30.500;01:02:00.000
+V_MPEG4/ISO/AVC, "/media/BDRemux/My Movie (2019)/My Movie.mkv", insertSEI, contSPS, fps=23.976, track=1, lang=eng
+A_AC3, "/media/BDRemux/My Movie (2019)/My Movie.mkv", track=2, lang=eng, timeshift=0ms

@@ -1,0 +1,4 @@
+MUXOPT --avchd --no-pcr-on-video-pid --new-audio-pes --vbr --vbv-len=500 --split-size=4096MB
+V_MPEG4/ISO/AVC, "/media/BDRemux/My Movie (2019)/My Movie.mkv", insertSEI, contSPS, fps=23.976, track=1, lang=eng
+A_DTS, /tmp/avchd-forge-abc123/audio-1.dts, track=0, lang=eng, timeshift=0ms
+A_AC3, /tmp/avchd-forge-abc123/audio-3.ac3, track=0, lang=fre, timeshift=0ms

@@ -21,4 +21,6 @@ scratch/
 *.m2ts
 *.mpls
 *.clpi
-*.meta
+
+# tsMuxeR meta files are written into temp dirs (which are cleaned up) — the
+# golden files in tests/data/meta are source, so nothing here ignores *.meta.
