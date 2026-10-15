@@ -5,8 +5,9 @@ protocol. Two implementations exist:
 
 * :class:`SubprocessRunner` (here) — plain ``subprocess``, used by the CLI and by
   tests; it never imports Qt.
-* :class:`~avchdforge.qprocess.QProcessRunner` — Qt-based, streams output line by
-  line and keeps the UI responsive.
+* :class:`QProcessRunner` — Qt-based, streams output line by line and keeps the UI
+  responsive. PySide6 is imported lazily, so this module still imports cleanly in a
+  Qt-less environment.
 
 Keeping the protocol tiny is what allows the core pipeline to be unit tested
 without spawning anything.
@@ -19,7 +20,7 @@ import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 LineCallback = Callable[[str], None]
 ProgressCallback = Callable[[float | None], None]
@@ -183,11 +184,205 @@ class SubprocessRunner:
             stream.close()
 
 
+class _LineBuffer:
+    """Accumulates one text stream and produces complete lines.
+
+    Lines keep their trailing newline, exactly like iterating a text-mode stream in
+    :class:`SubprocessRunner`, so callbacks see identical bytes from both runners.
+    CRLF and lone CR are folded to ``\\n`` first (universal-newline behaviour); the
+    only mismatch left is a CR at the very end of one read and a LF at the start of
+    the next, which no tool in this pipeline produces.
+    """
+
+    __slots__ = ("_pending", "lines")
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+        self._pending = ""
+
+    def feed(self, text: str) -> list[str]:
+        """Consume a chunk; return the complete lines it released."""
+        self._pending += text.replace("\r\n", "\n").replace("\r", "\n")
+        complete = self._pending.split("\n")
+        *rows, self._pending = complete
+        lines = [f"{row}\n" for row in rows]
+        self.lines.extend(lines)
+        return lines
+
+    def flush(self) -> list[str]:
+        """Release a trailing line that never got its newline."""
+        if not self._pending:
+            return []
+        tail, self._pending = self._pending, ""
+        self.lines.append(tail)
+        return [tail]
+
+
+def _import_qt() -> Any:
+    try:
+        from PySide6 import QtCore
+    except ImportError as exc:  # pragma: no cover - only hit without PySide6
+        raise RuntimeError(
+            "QProcessRunner needs PySide6; use SubprocessRunner when Qt is unavailable"
+        ) from exc
+    return QtCore
+
+
+class QProcessRunner:
+    """Runs tools through ``QProcess``, streaming output while the UI paints.
+
+    ``run()`` spins a nested :class:`QEventLoop`: the caller's stack stays intact,
+    but paint, timer and keyboard events keep being delivered to the rest of the
+    application, so the window never freezes. Signals are connected *before*
+    ``start()`` because Qt delivers a failure-to-start synchronously or not long
+    after, and a missed signal would mean a loop that never exits.
+
+    Cancellation kills the child only — never the process group — so a cancelled
+    mux cannot take the GUI down with it. Timeouts behave the same way and leave a
+    bracketed note in ``stderr``. Any of crash, kill or failed start surfaces as a
+    returncode of ``-1`` (raw exit codes for those are platform-dependent, so they
+    are not a contract).
+    """
+
+    def __init__(
+        self,
+        *,
+        echo: Callable[[str], None] | None = None,
+        parent: Any | None = None,
+    ) -> None:
+        self.echo = echo
+        self._parent = parent
+        self._qt = _import_qt()
+        self._process: Any | None = None
+        self._active = False
+        self._cancelled = False
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled
+
+    def cancel(self) -> None:
+        """Kill the running child; safe to call when idle and from any thread."""
+        self._cancelled = True
+        process = self._process
+        if process is not None and process.state() != self._qt.QProcess.NotRunning:
+            process.kill()
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        on_line: LineCallback | None = None,
+        on_progress: ProgressCallback | None = None,
+        scanner: ProgressScanner | None = None,
+        phase: str = "",
+        timeout: float | None = None,
+    ) -> CompletedRun:
+        if self._active:
+            raise RuntimeError("QProcessRunner is already running a command")
+
+        qt = self._qt
+        args = [str(item) for item in argv]
+        stdout_buffer = _LineBuffer()
+        stderr_buffer = _LineBuffer()
+        state: dict[str, Any] = {"done": False, "start_error": None}
+
+        def handle(line: str) -> None:
+            if on_line is not None:
+                on_line(line)
+            elif self.echo is not None:
+                self.echo(line)
+            if scanner is not None and on_progress is not None:
+                value = scanner.feed(line)
+                if value is not None:
+                    on_progress(value)
+
+        process = qt.QProcess(self._parent)
+        process.setProgram(args[0])
+        process.setArguments(args[1:])
+        if cwd is not None:
+            process.setWorkingDirectory(str(cwd))
+
+        loop = qt.QEventLoop()
+        timer = qt.QTimer()
+        timer.setSingleShot(True)
+
+        def read_stdout() -> None:
+            for line in stdout_buffer.feed(_decode(process.readAllStandardOutput())):
+                handle(line)
+
+        def read_stderr() -> None:
+            for line in stderr_buffer.feed(_decode(process.readAllStandardError())):
+                handle(line)
+
+        def stalled() -> None:
+            stderr_buffer.lines.append(f"[avchd-forge] command timed out after {timeout}s")
+            if process.state() != qt.QProcess.NotRunning:
+                process.kill()
+
+        def mark_done(*_args: object) -> None:
+            state["done"] = True
+            loop.quit()
+
+        def on_error(error: Any) -> None:
+            if error == qt.QProcess.FailedToStart:
+                state["start_error"] = f"[avchd-forge] failed to start: {process.errorString()}"
+                mark_done()
+
+        # Connections must exist before start(): a failure to start can arrive
+        # synchronously, and a lost signal would leave the nested loop running.
+        process.readyReadStandardOutput.connect(read_stdout)
+        process.readyReadStandardError.connect(read_stderr)
+        process.finished.connect(mark_done)
+        process.errorOccurred.connect(on_error)
+        timer.timeout.connect(stalled)
+
+        self._active = True
+        self._cancelled = False
+        self._process = process
+        try:
+            process.start()
+            if timeout is not None and timeout > 0:
+                timer.start(int(timeout * 1000))
+            if not state["done"]:
+                loop.exec()
+            timer.stop()
+            # Whatever came in with the child's last breath.
+            read_stdout()
+            read_stderr()
+            for line in stdout_buffer.flush() + stderr_buffer.flush():
+                handle(line)
+        finally:
+            self._active = False
+            self._process = None
+
+        if state["start_error"] is not None:
+            stderr_buffer.lines.append(str(state["start_error"]))
+            returncode = -1
+        elif process.exitStatus() == qt.QProcess.CrashExit:
+            returncode = -1
+        else:
+            returncode = process.exitCode()
+
+        return CompletedRun(
+            argv=tuple(args),
+            returncode=returncode,
+            stdout="".join(stdout_buffer.lines),
+            stderr="".join(stderr_buffer.lines),
+        )
+
+
+def _decode(data: Any) -> str:
+    return bytes(data).decode("utf-8", "replace")
+
+
 __all__ = [
     "CompletedRun",
     "LineCallback",
     "ProgressCallback",
     "ProgressScanner",
+    "QProcessRunner",
     "Runner",
     "SubprocessRunner",
 ]

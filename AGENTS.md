@@ -70,6 +70,9 @@ checks for them at startup and refuses to start with a clear message if any is m
 ## Testing conventions
 
 * `pytest`, plain functions, no network, no real media files, no spawned processes.
+  The one exception is `tests/test_qt_process.py`: `QProcessRunner` *is* Qt signal
+  plumbing, so it drives trivial `sys.executable -c` children. Keep it fast and
+  keep everything else on `FakeRunner`.
 * A `FakeRunner` (see `tests/conftest.py`) records argv and replays canned stdout —
   that is what "mock subprocess calls" means here.
 * `meta.py` output is asserted against golden files in `tests/data/meta/`. When you
