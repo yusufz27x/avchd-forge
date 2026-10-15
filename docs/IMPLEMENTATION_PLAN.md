@@ -80,7 +80,9 @@ A_AC3, "/in/source.mkv", track=2, lang=eng, timeshift=0ms
 S_HDMV/PGS, "/tmp/avchd-forge-xyz/subs/sub-0.sup", track=0, lang=eng
 ```
 
-* Paths are emitted with `/` separators, double quotes escaped, always quoted.
+* Paths are emitted with native separators and wrapped in double quotes only when
+  they contain spaces, tabs or quotes; backslashes are never doubled so that
+  Windows paths survive untouched. Line breaks in a path are refused.
 * `--split-size=<N>M` present only when FAT32 splitting is enabled (default 4096).
 * **Track ids are resolved before the meta is written** (D7/D8): `meta.py` takes a
   finished `track_id` per track and never computes one. Container tracks get the
