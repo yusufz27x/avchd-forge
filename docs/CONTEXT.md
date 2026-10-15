@@ -32,7 +32,7 @@ High@4.1 + two AC-3 tracks + a small SRT); `scratch/` holds throwaway mux output
   `MovieObject.bdmv` — not `MOVIEOBJ.BDM`.
 * `--split-size` accepts `KB/KiB/MB/MiB/GB/GiB`; `--split-size=1MB` on a 2.5 MB
   source produced `00000.m2ts` + `00001.m2ts` **(verified)**. `4096MB` is used for
-  FAT32 (4 GiB − 1 B per file, so 4096 MB leaves margin).
+  FAT32 (see §2.6 for the exact unit and split-point semantics).
 * **`track=` semantics depend on the input.** tsMuxeR's detection mode
   (`tsMuxeR <file>`) prints a `Track ID:` for every stream it sees, and the meta
   `track=` value must equal that number:
@@ -122,6 +122,34 @@ Paths containing spaces and non-ASCII characters (`scratch/dir with spaces/ünï
 säm ple.mkv`) mux correctly when the meta file is written as UTF-8 with quoted,
 escaped paths **(verified)**.
 
+### 2.6 What `--split-size` really means
+
+* **`MB` is 10⁶ bytes, not MiB.** `--help` on this build prints only the version
+  line, so the authority is the upstream source
+  (`justdan96/tsMuxer`, `tsMuxer/tsMuxer.cpp::parseMuxOpt`), where the size table is
+  `KB=1000, KiB=1024, MB=1000000, MiB=1048576, …` **(source-verified)**.
+* **Splitting happens at the next I-frame after the target is exceeded**, so chunks
+  overshoot the target by however long the current GOP still runs **(verified)**:
+
+  | `--split-size` | chunk sizes observed (bytes) |
+  | --- | --- |
+  | `1MB` | 1,585,152 + 1,388,544 |
+  | `500KB` | 909,312 + 681,984 + 663,552 + 731,136 |
+
+  Consequences encoded in `backend.py`: the target is computed with
+  `SPLIT_MB_BYTES = 1_000_000`, a chunk may exceed the target by up to
+  `SPLIT_OVERSHOOT_ALLOWANCE = 32 MiB` before the job fails, and the hard FAT32
+  ceiling is `FAT32_MAX_BYTES = 4_294_967_295`. The default 4096 MB target sits
+  ~199 MB below that ceiling, so even a 32 MiB overshoot cannot reach it.
+* **Every split part repeats all streams**, so verifying the *first* `.m2ts` is
+  enough to prove the stream composition of the whole tree **(verified)**.
+* One full backend run — ffmpeg SRT → SRT prep steps, tsMuxeR mux of
+  H.264 + 2×AC-3 + 2 SRT tracks, output verification — produced
+  `BDMV/STREAM/00000.m2ts` whose ffprobe stream list is
+  `H264, AC3 6ch, AC3 2ch, HDMV_PGS_SUBTITLE, HDMV_PGS_SUBTITLE` **(verified)**;
+  with `keep_temp_on_success` the temp dir holds exactly the two prepared
+  `sub-*.srt` files plus `tsmuxer-meta.txt`.
+
 ## 3. Decision log
 
 | # | Date | Decision | Why |
@@ -136,6 +164,7 @@ escaped paths **(verified)**.
 | D8 | 2026-10-15 | Track resolution aligns ffprobe streams with detection entries per media kind, monotonic in file order, and only when the codec **family** matches (`A_AC3` covers AC-3/AC-3+/TrueHD, `pcm_*` counts as LPCM); anything unmapped is a hard error | guessing wrong drops audio silently or crashes tsMuxeR |
 | D9 | 2026-10-15 | Extracted cores/`.srt` are written to temp and referenced as raw elementary streams (`track=0`, ignored by tsMuxeR) | removes the TS/MKV numbering question entirely for prepared tracks |
 | D10 | 2026-10-15 | A `JobPlan` is a pure function of media + selection + detection + options, and carries one expected codec family (and channel count) per stream of the finished disc | the post-mux check (D4) needs a machine-checkable expectation, and keeping the plan pure makes it unit-testable without running any tool |
+| D11 | 2026-10-15 | Split verification measures with `SPLIT_MB_BYTES = 10⁶` and fails a chunk only when it exceeds target + 32 MiB | tsMuxeR splits at keyframes and `MB` is decimal (§2.6); a hard `≤ target` assertion would fail on every real file |
 
 ## 4. Open items
 

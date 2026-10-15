@@ -78,6 +78,11 @@ class Runner(Protocol):
         """Ask the running command to stop; safe to call when nothing runs."""
         ...
 
+    @property
+    def cancelled(self) -> bool:
+        """True once :meth:`cancel` was called for the run in progress."""
+        ...
+
 
 @dataclass
 class SubprocessRunner:
