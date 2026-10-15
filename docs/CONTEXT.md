@@ -100,6 +100,13 @@ reject zero-channel audio streams. `Mux successful complete` alone is not proof.
   tests over canned ffprobe output.
 * Subtitle/text handling: SRT/ASS → SRT via `-f srt -c:s srt` is lossless enough for
   rendering, and tsMuxeR needs UTF-8/16/32 SRT input.
+* E-AC-3 without an AC-3 core: `-bsf:a eac3_core -f ac3` **fails at the muxer**
+  ("ac3 muxer supports only codec ac3 for type audio") and leaves behind a file
+  that ffprobe reports as `ac3` with **0 channels** — verified with a
+  lavfi-generated DD+ stream. Two independent guards therefore fire for a
+  coreless source: ffmpeg's non-zero exit and `prep.check_prep_output`'s
+  channel check. This is the expected, explicit failure rather than a silent
+  wrong mux.
 
 ### 2.4 SRT → PGS actually works (chosen fallback, verified)
 
