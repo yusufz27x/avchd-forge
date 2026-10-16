@@ -207,7 +207,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.drive_combo.setMinimumWidth(240)
         self.drive_combo.setToolTip("Mounted drives, removable ones first (Tools ▸ Re-check)")
         self.output_edit = QtWidgets.QLineEdit(row)
-        self.output_edit.setPlaceholderText("Folder that will receive the BDMV directory")
+        self.output_edit.setPlaceholderText("Folder that will receive the AVCHD folder")
+        self.output_edit.setToolTip(
+            "The tree is written into an AVCHD subfolder here — the folder a PS3 "
+            "mounts from a USB drive root. If this folder is already named AVCHD, "
+            "it is used as-is."
+        )
         self.browse_button = QtWidgets.QPushButton("Browse…", row)
         self.badge_label = QtWidgets.QLabel(row)
         self.badge_label.setMinimumWidth(120)

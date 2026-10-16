@@ -269,11 +269,13 @@ def test_job_runs_detection_mux_and_verification(tmp_path: Path) -> None:
     assert watcher.events[-1] == "finished"
     assert watcher.failures == [] and watcher.cancellations == []
     outcome = watcher.outcomes[0]
+    # the plan writes into the AVCHD folder it creates inside the chosen folder
+    assert outcome.plan.output_dir == output_dir / "AVCHD"
     assert [path.name for path in outcome.stream_files] == ["00000.MTS"]
-    assert outcome.verified_file == output_dir / "BDMV" / "STREAM" / "00000.MTS"
+    assert outcome.verified_file == output_dir / "AVCHD" / "BDMV" / "STREAM" / "00000.MTS"
     # the job layer ships the AVCHD-on-FAT32 names the PS3 mounts from USB
-    assert (output_dir / "BDMV" / "INDEX.BDM").is_file()
-    assert not (output_dir / "BDMV" / "index.bdmv").exists()
+    assert (output_dir / "AVCHD" / "BDMV" / "INDEX.BDM").is_file()
+    assert not (output_dir / "AVCHD" / "BDMV" / "index.bdmv").exists()
     # the plan stage comes from here, the rest from the backend
     assert watcher.stage_keys == ["plan", "mux", "verify", "cleanup"]
     assert watcher.stages[0].label == PLAN_STAGE_LABEL
@@ -287,7 +289,7 @@ def test_job_runs_detection_mux_and_verification(tmp_path: Path) -> None:
     detection, mux = runner.calls[1], runner.calls[2]
     assert detection[1].endswith("source.mkv")
     assert mux[1].endswith("tsmuxer-meta.txt")
-    assert mux[2] == str(output_dir)
+    assert mux[2] == str(output_dir / "AVCHD")
     # the log pane shows what the plan will do
     assert "splitting  on (4096 MB)" in watcher.text
     assert "done: 1 stream part written" in watcher.text
@@ -448,6 +450,9 @@ def test_cancelled_job_reports_the_stage_and_what_it_left_behind(tmp_path: Path)
     script_success(runner)
     job = make_job(runner)
     watcher = JobWatcher(job)
+    # unrelated files in the chosen folder must not count as leftovers
+    (tmp_path / "out").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "out" / "unrelated.txt").write_text("x", encoding="utf-8")
 
     def cancel_with_partial_output(argv: list[str]) -> None:
         output_dir = Path(argv[-1])
@@ -469,6 +474,9 @@ def test_cancelled_job_reports_the_stage_and_what_it_left_behind(tmp_path: Path)
     cancellation = watcher.cancellations[0]
     assert cancellation.stage == "muxing"
     assert [path.name for path in cancellation.leftovers] == ["partial.tmp"]
+    # the leftover scan looks under the AVCHD folder the mux wrote into, not
+    # at the whole chosen folder
+    assert cancellation.leftovers[0].parent == tmp_path / "out" / "AVCHD"
     # a cancellation keeps the temp dir even though failures would not be kept
     assert cancellation.temp_dir is not None and cancellation.temp_dir.exists()
     assert (cancellation.temp_dir / "tsmuxer-meta.txt").exists()

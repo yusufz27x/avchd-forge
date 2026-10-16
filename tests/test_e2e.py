@@ -170,14 +170,16 @@ def test_generated_media_remuxes_into_a_verified_avchd_tree(
 
     outcome = _run_pipeline(sample, tools, output_dir, temp_dir, split_size_mb=4096)
 
-    bdmv = output_dir / "BDMV"
+    # the app creates the AVCHD folder a PS3 mounts from a USB drive root
+    assert (output_dir / "AVCHD").is_dir()
+    bdmv = output_dir / "AVCHD" / "BDMV"
     # the shipped tree is the AVCHD-on-FAT32 flavour a PS3 mounts from USB
     assert (bdmv / "INDEX.BDM").is_file()
     assert (bdmv / "MOVIEOBJ.BDM").is_file()
     assert list((bdmv / "PLAYLIST").glob("*.MPL"))
     assert list((bdmv / "STREAM").glob("*.MTS"))
     assert not (bdmv / "index.bdmv").exists()
-    assert (output_dir / "CERTIFICATE").is_dir()
+    assert (output_dir / "AVCHD" / "CERTIFICATE").is_dir()
     assert len(outcome.stream_files) == 1, "4 GB of headroom must not split a 4 MB sample"
     assert outcome.verified_file == outcome.stream_files[0]
     assert not temp_dir.exists(), "a successful job must clean up its temp dir"

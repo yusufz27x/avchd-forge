@@ -509,6 +509,10 @@ def run_mux(
     on_progress: ProgressCallback | None = None,
 ) -> CompletedRun:
     """Write the meta file and run tsMuxeR; raise :class:`MuxError` on failure."""
+    # plan.output_dir is the AVCHD folder (:func:`avchdforge.plan.avchd_destination`);
+    # it may not exist yet when the user pointed at a drive root, and tsMuxeR
+    # expects the folder it writes into to be there.
+    plan.output_dir.mkdir(parents=True, exist_ok=True)
     plan.meta_path.write_text(plan.meta_text, encoding="utf-8")
     if on_line is not None:
         on_line(f"$ {plan.command_line}\n")

@@ -24,6 +24,7 @@ from avchdforge.plan import (
     META_FILE_NAME,
     JobPlan,
     PlanOptions,
+    avchd_destination,
     build_plan,
     describe_plan,
     plan_for_source,
@@ -125,6 +126,39 @@ def test_mux_command_is_meta_file_then_output_dir():
     assert plan.command_line.startswith("tsMuxeR ")
     assert plan.meta_path == TEMP / META_FILE_NAME
     assert plan.splits is True
+
+
+def test_a_plain_output_folder_gets_the_avchd_folder_created_for_it():
+    """The PS3 mounts AVCHD only from a folder called ``AVCHD`` (§2.11)."""
+    plan = build_plan(
+        ac3_media(),
+        TrackSelection(audio=(1,)),
+        AC3_DETECTION,
+        output_dir=Path("/media/USB"),
+        temp_dir=TEMP,
+    )
+
+    assert plan.output_dir == Path("/media/USB") / "AVCHD"
+    assert plan.mux_argv[-1] == "/media/USB/AVCHD"
+
+
+def test_an_avchd_output_folder_is_used_as_is():
+    plan = build_plan(
+        ac3_media(),
+        TrackSelection(audio=(1,)),
+        AC3_DETECTION,
+        output_dir=OUT,
+        temp_dir=TEMP,
+    )
+
+    assert plan.output_dir == OUT
+
+
+def test_avchd_destination_does_not_nest_the_folder_again():
+    assert avchd_destination(Path("/media/usb")) == Path("/media/usb/AVCHD")
+    assert avchd_destination(Path("/media/usb/AVCHD")) == Path("/media/usb/AVCHD")
+    # FAT32 lookups are case-insensitive, so ``avchd`` already is the folder
+    assert avchd_destination(Path("/media/usb/avchd")) == Path("/media/usb/avchd")
 
 
 def test_split_size_can_be_disabled_for_a_non_fat32_target():
@@ -392,7 +426,7 @@ def test_plan_for_source_makes_paths_absolute(runner, tmp_media):
         temp_dir=Path("tmp"),
     )
 
-    assert plan.output_dir == Path.cwd() / "out"
+    assert plan.output_dir == Path.cwd() / "out" / "AVCHD"
     assert plan.temp_dir == Path.cwd() / "tmp"
     assert plan.source.is_absolute()
     assert plan.meta_path == Path.cwd() / "tmp" / META_FILE_NAME

@@ -53,6 +53,11 @@ from .validate_types import Issue, ValidationReport
 #: Name of the meta file inside the job's temp directory.
 META_FILE_NAME: Final[str] = "tsmuxer-meta.txt"
 
+#: Name of the folder a PS3 mounts AVCHD from at a USB drive root. The app
+#: creates it inside the chosen output folder when that folder is not already
+#: one (``docs/CONTEXT.md`` §2.11).
+AVCHD_DIR_NAME: Final[str] = "AVCHD"
+
 #: Container/mux overhead applied to the size estimate (a hint for free space).
 OUTPUT_OVERHEAD: Final[float] = 1.03
 
@@ -230,6 +235,27 @@ def _fallback_bitrate(track: PlannedTrack) -> int | None:
 
 
 # --------------------------------------------------------------------------
+# destination
+# --------------------------------------------------------------------------
+
+
+def avchd_destination(output_dir: Path | str) -> Path:
+    """The folder the mux writes into, given the folder the user chose.
+
+    A PS3 mounts AVCHD from a USB drive only when the tree sits in a folder
+    called ``AVCHD`` at the drive root (``docs/CONTEXT.md`` §2.11), so the app
+    creates that folder itself: the destination is ``<output_dir>/AVCHD`` unless
+    the chosen folder already carries the name. The comparison is
+    case-insensitive, like the FAT32 lookups the PS3 does — pointing at the
+    drive root and pointing at its ``AVCHD`` folder both do the right thing.
+    """
+    target = Path(output_dir)
+    if target.name.lower() == AVCHD_DIR_NAME.lower():
+        return target
+    return target / AVCHD_DIR_NAME
+
+
+# --------------------------------------------------------------------------
 # building
 # --------------------------------------------------------------------------
 
@@ -246,6 +272,10 @@ def build_plan(
     decisions: dict[int, AudioDecision] | None = None,
 ) -> JobPlan:
     """Build the plan. Pure: same arguments, byte-identical meta file.
+
+    The mux destination is normalised to the ``AVCHD`` folder a PS3 mounts from
+    USB (:func:`avchd_destination`), so ``plan.output_dir`` is where the tree
+    must end up, not necessarily the folder the user picked.
 
     Raises :class:`~avchdforge.errors.ValidationFailed` when the selection is not
     usable, and :class:`~avchdforge.errors.TrackMappingError` when a selected
@@ -266,7 +296,7 @@ def build_plan(
     if video is None:  # pragma: no cover - validation refuses video-less media
         raise PlanError("The source has no video stream to mux.")
 
-    target_dir = Path(output_dir)
+    target_dir = avchd_destination(output_dir)
     work_dir = Path(temp_dir)
     track_ids = resolve_track_ids(media, detection)
 
@@ -500,12 +530,14 @@ def describe_plan(plan: JobPlan) -> list[str]:
 
 
 __all__ = [
+    "AVCHD_DIR_NAME",
     "FALLBACK_AUDIO_BITRATES",
     "META_FILE_NAME",
     "OUTPUT_OVERHEAD",
     "JobPlan",
     "PlanOptions",
     "PlannedTrack",
+    "avchd_destination",
     "build_plan",
     "describe_plan",
     "plan_for_source",

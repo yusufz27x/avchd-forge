@@ -602,7 +602,8 @@ def test_start_runs_the_job_and_reports_success(tmp_path: Path) -> None:
     assert window.open_output_button.isEnabled()
     assert window.open_output_action.isEnabled()
     assert window.temp_dir is None
-    assert window._settings.last_output_dir() == tmp_path / "out"
+    # the run wrote into the AVCHD folder it created, and that is remembered
+    assert window._settings.last_output_dir() == tmp_path / "out" / "AVCHD"
     assert "done: 1 stream part written" in window.log_pane.text()
 
 

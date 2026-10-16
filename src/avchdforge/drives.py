@@ -76,8 +76,10 @@ FREE_SPACE_WARNING: Final[str] = "V16"
 #: Blocking: the chosen folder already holds an AVCHD tree (V20).
 EXISTING_TREE_ERROR: Final[str] = "V20"
 
-#: Names that mean an AVCHD tree already lives in the chosen folder: the tree
-#: this app writes (``BDMV/``) and the camcorder/USB layout (``AVCHD/BDMV/``).
+#: Names that mean an AVCHD tree already lives in the chosen folder — the two
+#: shapes this app's own output can take (``AVCHD/BDMV`` inside the chosen
+#: folder, or ``BDMV/`` when the folder itself is named ``AVCHD``) and the
+#: camcorder/USB layout (``AVCHD/BDMV`` at a drive root).
 TREE_MARKERS: Final[tuple[Path, ...]] = (Path("BDMV"), Path("AVCHD") / "BDMV")
 
 

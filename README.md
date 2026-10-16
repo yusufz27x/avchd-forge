@@ -28,8 +28,9 @@ log pane:
 3. **prep** — selected DTS-HD/TrueHD/E-AC-3 tracks are losslessly core-extracted,
    and text subtitles are converted, with `ffmpeg` into a private temp directory.
 4. **mux** — a `.meta` file is generated (`MUXOPT --avchd … --split-size=4096MB`)
-   and `tsMuxeR <meta> <output>` writes the `BDMV/` + `CERTIFICATE/` tree,
-   optionally split every N MB.
+   and `tsMuxeR <meta> <output>` writes the `BDMV/` + `CERTIFICATE/` tree into
+   an `AVCHD` folder it creates inside the chosen folder (unless that folder is
+   already one), optionally split every N MB.
 5. **verify** — tsMuxeR's tree is renamed to the AVCHD-on-FAT32 (8.3) names the
    PS3 mounts from USB (`INDEX.BDM`, `MOVIEOBJ.BDM`, `*.MPL`, `*.CPI`, `*.MTS`),
    all required files must exist, every stream part must respect the split
@@ -101,7 +102,10 @@ folder, and the source can also be dragged onto the window.
   badge shows `FAT32`, `exFAT`, `NTFS`, … and inline warnings tell you when the
   split setting and the filesystem disagree (V15) or when the estimate may not
   fit in the free space (V16). Warnings never block; a read-only target or a
-  folder that already holds an AVCHD tree does (V20).
+  folder that already holds an AVCHD tree does (V20). The app writes into an
+  `AVCHD` folder inside the chosen folder — the one the PS3 mounts from a USB
+  drive root — creating it if needed (a folder already named `AVCHD` is used
+  as-is).
 * **Run bar** — Start/Cancel, current stage, progress bar and elapsed time. When
   the run ends the bar says what happened; success offers *Open output folder*,
   failure offers the kept *Open temp dir*.
@@ -152,37 +156,48 @@ mux, avchd-forge renames the tree (`BACKUP/` included, no file content touched)
 and verifies the result:
 
 ```
-<output>/BDMV/INDEX.BDM
-       /BDMV/MOVIEOBJ.BDM
-       /BDMV/PLAYLIST/*.MPL
-       /BDMV/STREAM/*.MTS
-       /CERTIFICATE/…
+<output>/AVCHD/BDMV/INDEX.BDM
+              /BDMV/MOVIEOBJ.BDM
+              /BDMV/PLAYLIST/*.MPL
+              /BDMV/STREAM/*.MTS
+              /CERTIFICATE/…
 ```
 
-On a USB drive the PS3 looks for this tree inside a folder called `AVCHD` at the
-root of the device — point the app at `<drive>/AVCHD` rather than the drive
-itself.
+The app creates the `AVCHD` folder itself: point it at the drive root (or at any
+empty folder you want a title in) and the tree is written into `<folder>/AVCHD`,
+which is exactly where the PS3 mounts it from. Pointing directly at an existing
+`AVCHD` folder works too — the name is recognised case-insensitively and nothing
+is nested twice.
 
 ## Several movies on one drive
 
-A stock PS3 recognises **one AVCHD structure per drive**, so the folder the app
-writes into must hold exactly one title. To keep more movies on the same stick,
-give each one its own folder and rename the folder of the movie you want to
-watch to `AVCHD`:
+A stock PS3 recognises **one AVCHD structure per drive**, so exactly one folder
+may be called `AVCHD` at the root. Give every movie its own folder and point the
+app at it — each run creates the `AVCHD` folder inside:
 
 ```
-<drive>/AVCHD/       ← the movie the PS3 sees now (BDMV/ + CERTIFICATE/)
-<drive>/Title B/     ← full tree, waiting
-<drive>/Title C/     ← full tree, waiting
+<drive>/AVCHD/          ← the movie the PS3 sees now (BDMV/ + CERTIFICATE/)
+<drive>/Title B/AVCHD/  ← full tree, waiting
+<drive>/Title C/AVCHD/  ← full tree, waiting
 ```
 
-Renaming `AVCHD` to something else and the wanted folder to `AVCHD` is instant
-on FAT32 (only the directory entry changes); re-insert the drive and the PS3
-shows the new title. avchd-forge refuses to start when the chosen output folder
-already contains a `BDMV` tree (`BDMV/` or `AVCHD/BDMV/`) — the mux reuses fixed
-file names (`INDEX.BDM`, `00000.MTS`, …) and a second run would overwrite the
-first movie. Multi-title discs (several playlists inside one BDMV, the
-multiAVCHD approach) are not supported.
+To switch titles, move the folders — instant on FAT32, only directory entries
+change; re-insert the drive and the PS3 shows the new title:
+
+```bash
+mkdir "Title A"                # park the current title
+mv AVCHD "Title A/AVCHD"
+mv "Title B/AVCHD" AVCHD       # activate Title B
+```
+
+(A tree that sits directly in a folder — made by an older version or another
+tool — is activated by renaming that folder itself to `AVCHD`.)
+
+avchd-forge refuses to start when the chosen output folder already contains a
+`BDMV` tree (`BDMV/` or `AVCHD/BDMV/`) — the mux reuses fixed file names
+(`INDEX.BDM`, `00000.MTS`, …) and a second run would overwrite the first movie.
+Multi-title discs (several playlists inside one BDMV, the multiAVCHD approach)
+are not supported.
 
 ## Troubleshooting
 
@@ -190,10 +205,11 @@ multiAVCHD approach) are not supported.
   source or an unusable one, no output folder, a read-only target, or an output
   folder that already holds an AVCHD tree (choose an empty folder).
 * **No AVCHD entry on the PS3** — the tree must sit in a folder called `AVCHD`
-  at the root of a FAT32 device and carry the 8.3 names avchd-forge writes
-  (`INDEX.BDM`, `*.MTS`, …). If the stream parts play from the file browser
-  (Triangle ▸ *Display All*) but no AVCHD icon appears, the folder name/case or
-  the file names are off.
+  at the root of a FAT32 device (avchd-forge creates it; pointing the app at the
+  drive root is enough) and carry the 8.3 names it writes (`INDEX.BDM`,
+  `*.MTS`, …). If the stream parts play from the file browser (Triangle ▸
+  *Display All*) but no AVCHD icon appears, the folder name/case or the file
+  names are off.
 * **A run failed** — the temp directory is kept; *Open temp dir* shows the
   intermediate files, and the log has the exact argv, working directory, exit
   code and full output of the failing command.

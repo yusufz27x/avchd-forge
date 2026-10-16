@@ -49,7 +49,7 @@ from .errors import (
     ValidationFailed,
     VerificationError,
 )
-from .plan import JobPlan, PlanOptions, build_plan, describe_plan
+from .plan import JobPlan, PlanOptions, avchd_destination, build_plan, describe_plan
 from .probe import MediaInfo, probe
 from .process import QProcessRunner, Runner
 from .selection import TrackSelection, default_selection
@@ -197,7 +197,9 @@ def build_job_plan(request: JobRequest, runner: Runner, *, temp_dir: Path) -> Jo
     ordering: the GUI shows the issues before a job starts, so validation runs
     first here and its report is reused by ``build_plan`` instead of being
     computed twice. An output folder that already holds an AVCHD tree is
-    refused before any tool runs (V20).
+    refused before any tool runs (V20). The plan's ``output_dir`` is the
+    ``AVCHD`` folder inside the chosen one
+    (:func:`~avchdforge.plan.avchd_destination`).
     """
     output_dir = Path(request.output_dir).expanduser()
     marker = existing_tree(output_dir)
@@ -495,7 +497,11 @@ class JobRunner(QtCore.QObject):
         # A tool that was killed raises a tool error from its own stack; the
         # runner's flag is the reliable way to tell "stopped on purpose" apart
         # from "crashed", so callers route both through here.
-        leftovers = _tree_files(output_dir) if output_dir is not None else ()
+        # The run writes under the AVCHD folder, so scan that one: the chosen
+        # folder may hold unrelated files, or other titles on the same drive.
+        leftovers = (
+            _tree_files(avchd_destination(output_dir)) if output_dir is not None else ()
+        )
         cancellation = JobCancellation(
             stage=exc.stage,
             source=source,

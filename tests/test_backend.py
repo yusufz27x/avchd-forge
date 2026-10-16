@@ -25,6 +25,7 @@ from avchdforge.backend import (
     execute_plan,
     find_streams,
     rename_tree_for_usb,
+    run_mux,
     verify_output,
 )
 from avchdforge.errors import JobCancelled, MuxError, VerificationError
@@ -477,6 +478,19 @@ def test_execute_plan_writes_the_meta_file(tmp_path: Path, runner) -> None:
 
     assert outcome.temp_dir_kept
     assert plan.meta_path.read_text(encoding="utf-8") == plan.meta_text
+
+
+def test_run_mux_creates_the_avchd_folder_it_writes_into(tmp_path: Path, runner) -> None:
+    """The user may have pointed at a drive root: ``<root>/AVCHD`` need not exist."""
+    plan = ac3_plan(tmp_path)
+    plan.temp_dir.mkdir(parents=True)
+    assert plan.output_dir.name == "AVCHD"
+    assert not plan.output_dir.exists()
+    runner.add(FakeResponse(stdout=MUX_OK, match="tsMuxeR"))
+
+    run_mux(plan, runner)
+
+    assert plan.output_dir.is_dir()
 
 
 def test_execute_plan_removes_its_own_temp_dir(tmp_path: Path, runner) -> None:
