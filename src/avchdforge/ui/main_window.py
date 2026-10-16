@@ -18,7 +18,8 @@ Three deliberate choices worth remembering:
 * **The log is a collapsible bottom pane**, not a dock: its own toggle button
   already carries the state, and the splitter keeps it resizable.
 * **Target warnings never block.** ``assess_target`` warnings (V15/V16) are shown
-  inline; only a read-only target or a missing toolchain actually disables Start.
+  inline; Start is disabled by a missing toolchain, unusable media, a read-only
+  target or an output folder that already holds an AVCHD tree (V20).
 
 The window owns exactly one tool state: :meth:`check_tools` adopts a report (and
 with it the toolchain and Start's enabled-ness), while ``adopt=False`` answers the
@@ -643,6 +644,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         if self._report is not None and not self._report.ok:
             return False
+        if self._target is not None and not self._target.ok:
+            return False
 
         self.log_pane.set_collapsed(False)
         self._on_line(
@@ -708,6 +711,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_pane.set_stage("")
         self._temp_dir = outcome.plan.temp_dir if outcome.temp_dir_kept else None
         self._settings.set_last_output_dir(outcome.plan.output_dir)
+        self._assess_output()  # the run may have left a tree behind (V20)
         self._set_busy(False)
         self.status_label.setText(
             f"Done — {count} stream part{'s' if count != 1 else ''} written to "
@@ -722,6 +726,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stage_label.setText("Failed")
         self.log_pane.set_stage("")
         self._temp_dir = failure.temp_dir
+        self._assess_output()  # a failed mux can leave a partial tree behind (V20)
         self._set_busy(False)
         self.status_label.setText(failure.title)
         self.status_label.setToolTip(failure.detail)
@@ -732,6 +737,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stage_label.setText("Cancelled")
         self.log_pane.set_stage("")
         self._temp_dir = cancellation.temp_dir
+        self._assess_output()  # a cancelled mux can leave a partial tree behind (V20)
         self._set_busy(False)
         self.status_label.setText(f"Cancelled {cancellation.stage}".strip())
         self.notify("Job cancelled")
@@ -781,8 +787,13 @@ class MainWindow(QtWidgets.QMainWindow):
             and self._report.ok
         )
         output = self.output_dir() is not None
-        self.start_button.setEnabled(not self._busy and usable and output and has_tools)
-        self.start_button.setToolTip(self._start_hint(usable, output, has_tools))
+        target_ok = self._target is not None and self._target.ok
+        self.start_button.setEnabled(
+            not self._busy and usable and output and target_ok and has_tools
+        )
+        self.start_button.setToolTip(
+            self._start_hint(usable, output, target_ok, has_tools)
+        )
         self.cancel_button.setEnabled(self._busy)
         self.open_output_button.setEnabled(output)
         self.open_output_action.setEnabled(output)
@@ -798,7 +809,9 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             action.setEnabled(not self._busy)
 
-    def _start_hint(self, usable: bool, output: bool, has_tools: bool) -> str:
+    def _start_hint(
+        self, usable: bool, output: bool, target_ok: bool, has_tools: bool
+    ) -> str:
         if not has_tools:
             return "External tools missing — set their paths in Tools ▸ Preferences…"
         if self._outcome is None:
@@ -807,6 +820,15 @@ class MainWindow(QtWidgets.QMainWindow):
             assert self._report is not None  # narrowed by the caller
             first = self._report.errors[0] if self._report.errors else None
             return f"This file cannot be used — {first.message}" if first else "Not ready"
+        if output and not target_ok:
+            first = (
+                self._target.errors[0]
+                if self._target is not None and self._target.errors
+                else None
+            )
+            if first is not None:
+                return f"The output folder cannot be used — {first.message}"
+            return "The output folder is not writable"
         if not output:
             return "Choose an output folder"
         return "Start the mux"

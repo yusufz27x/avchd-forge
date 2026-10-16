@@ -82,6 +82,23 @@ class ValidationFailed(AvchdForgeError):
         super().__init__(f"Input is not usable:\n{joined}")
 
 
+class ExistingTreeError(AvchdForgeError):
+    """The output folder already contains an AVCHD structure.
+
+    tsMuxeR writes fixed names (``index.bdmv``, ``00000.m2ts``, …), so muxing
+    into a folder that already holds a tree would overwrite the first title.
+    """
+
+    def __init__(self, output_dir: Path, marker: Path) -> None:
+        self.output_dir = output_dir
+        self.marker = marker
+        super().__init__(
+            f"{output_dir} already contains an AVCHD structure ({marker}). "
+            f"Muxing here would overwrite it — choose an empty folder for each "
+            f"title, or delete the tree to retry."
+        )
+
+
 class PrepError(ToolExecutionError):
     """An ffmpeg preparation step (core extraction, subtitle conversion) failed."""
 
@@ -145,6 +162,7 @@ def _last_lines(text: str, count: int) -> str:
 
 __all__ = [
     "AvchdForgeError",
+    "ExistingTreeError",
     "Issue",
     "JobCancelled",
     "MuxError",

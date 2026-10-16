@@ -66,6 +66,9 @@ Golden fixtures live in `tests/data/ffprobe/`.
 | V15 | target filesystem is not FAT32 while splitting is on | warning |
 | V16 | estimated output size > free space on target | warning |
 | V17 | duration missing / zero | warning |
+| V18 | subtitle streams that cannot be converted to PGS are not offered | warning |
+| V19 | a selected subtitle stream is missing or cannot be converted to PGS | error |
+| V20 | output folder already contains an AVCHD tree (`BDMV/` or `AVCHD/BDMV/`) | error |
 
 Errors block the Start button; warnings are listed and shown inline on the track row.
 
@@ -168,6 +171,9 @@ removable flag, size, model), falls back to `/proc/mounts` when `lsblk` is absen
 `assess_target(path) -> TargetReport` returns the containing mount, `fstype`,
 `removable`, free bytes and warnings (V15, V16). FAT32 detection accepts
 `vfat`/`msdos`; `exfat`/`ntfs` are reported as "not FAT32 — splitting is optional".
+`existing_tree()` detects a tree already present (`BDMV/` or `AVCHD/BDMV/`) and
+becomes a blocking V20 error (`TargetReport.errors`) — tsMuxeR reuses fixed
+names, so a second run into the same folder would overwrite the first title.
 
 ### Settings (`settings.py`)
 

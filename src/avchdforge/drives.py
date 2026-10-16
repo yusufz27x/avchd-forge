@@ -14,6 +14,10 @@ The rules that end up as warnings are the ones from the brief:
   is optional, and turning it off is the only way to get a single ``.m2ts``.
 * **V16** — the estimated output does not fit in the free space.
 
+One check blocks instead of warning — **V20**: the output folder must not
+already hold an AVCHD tree (``BDMV/`` or ``AVCHD/BDMV/``). tsMuxeR writes fixed
+names, so a second run into the same folder would overwrite the first title.
+
 Everything here is Qt-free: ``list_drives`` takes a
 :class:`~avchdforge.process.Runner` (the GUI passes its ``QProcessRunner``, the
 tests a ``FakeRunner``) and nothing else spawns a process.
@@ -33,7 +37,7 @@ from typing import Any, Final
 
 from .constants import FAT32_FILESYSTEMS
 from .process import Runner
-from .validate_types import Issue, warning
+from .validate_types import Issue, error, warning
 
 LSBLK: Final[str] = "lsblk"
 
@@ -68,6 +72,13 @@ _UNITS: Final[dict[str, int]] = {
 #: V15 and V16 live here; the media rules own the rest of the numbering.
 FAT32_SPLIT_WARNING: Final[str] = "V15"
 FREE_SPACE_WARNING: Final[str] = "V16"
+
+#: Blocking: the chosen folder already holds an AVCHD tree (V20).
+EXISTING_TREE_ERROR: Final[str] = "V20"
+
+#: Names that mean an AVCHD tree already lives in the chosen folder: the tree
+#: this app writes (``BDMV/``) and the camcorder/USB layout (``AVCHD/BDMV/``).
+TREE_MARKERS: Final[tuple[Path, ...]] = (Path("BDMV"), Path("AVCHD") / "BDMV")
 
 
 # --------------------------------------------------------------------------
@@ -138,6 +149,8 @@ class TargetReport:
     #: ``None`` when the path does not exist yet (it is created at mux time).
     writable: bool | None = None
     warnings: tuple[Issue, ...] = ()
+    #: Findings that block a job (an existing AVCHD tree); warnings never do.
+    errors: tuple[Issue, ...] = ()
 
     @property
     def fstype(self) -> str:
@@ -166,15 +179,15 @@ class TargetReport:
 
     @property
     def ok(self) -> bool:
-        """Warnings never block a job; a read-only target does."""
-        return self.writable in (True, None)
+        """Warnings never block a job; a read-only target or an existing tree does."""
+        return self.writable in (True, None) and not self.errors
 
     @property
     def has_error(self) -> bool:
         return not self.ok
 
     def messages(self) -> list[str]:
-        return [issue.message for issue in self.warnings]
+        return [issue.message for issue in (*self.errors, *self.warnings)]
 
     def free_label(self) -> str:
         return format_size(self.free_bytes) if self.free_bytes is not None else "unknown"
@@ -400,6 +413,19 @@ def free_bytes(path: Path | str) -> int | None:
     return None  # pragma: no cover - only when nothing on the path exists
 
 
+def existing_tree(path: Path | str) -> Path | None:
+    """The AVCHD marker already present under ``path``, or ``None``.
+
+    tsMuxeR reuses fixed names (``index.bdmv``, ``00000.m2ts``, …), so muxing
+    into a folder that already holds a tree would overwrite the first title.
+    """
+    target = Path(path).expanduser()
+    for marker in TREE_MARKERS:
+        if (target / marker).exists():
+            return marker
+    return None
+
+
 def assess_target(
     path: Path | str,
     *,
@@ -456,6 +482,18 @@ def assess_target(
             )
         )
 
+    errors: list[Issue] = []
+    marker = existing_tree(target)
+    if marker is not None:
+        errors.append(
+            error(
+                EXISTING_TREE_ERROR,
+                f"{target} already contains an AVCHD structure ({marker}). "
+                f"Muxing here would overwrite it — choose an empty folder for "
+                f"each title, or delete the tree to retry.",
+            )
+        )
+
     return TargetReport(
         path=target,
         drive=drive,
@@ -463,6 +501,7 @@ def assess_target(
         needed_bytes=needed_bytes,
         writable=writable,
         warnings=tuple(issues),
+        errors=tuple(errors),
     )
 
 
@@ -494,14 +533,17 @@ def format_size(size: int | None) -> str:
 
 
 __all__ = [
+    "EXISTING_TREE_ERROR",
     "FAT32_SPLIT_WARNING",
     "FREE_SPACE_WARNING",
     "LSBLK",
     "LSBLK_ARGV",
     "PROC_MOUNTS",
+    "TREE_MARKERS",
     "Drive",
     "TargetReport",
     "assess_target",
+    "existing_tree",
     "find_drive",
     "format_size",
     "free_bytes",

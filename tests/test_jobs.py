@@ -19,7 +19,7 @@ import pytest
 pytest.importorskip("PySide6", reason="jobs.py is Qt orchestration")
 pytest.importorskip("pytestqt", reason="the job tests use pytest-qt")
 
-from avchdforge.errors import ValidationFailed
+from avchdforge.errors import ExistingTreeError, ValidationFailed
 from avchdforge.jobs import (
     PLAN_STAGE_LABEL,
     TEMP_PREFIX,
@@ -544,6 +544,21 @@ def test_build_job_plan_raises_before_the_detection_run(tmp_path: Path) -> None:
         build_job_plan(request_for(tmp_path), runner, temp_dir=tmp_path / "tmp")
 
     assert [Path(call[0]).name for call in runner.calls] == ["ffprobe"]
+
+
+def test_build_job_plan_refuses_an_existing_avchd_tree(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    output = tmp_path / "out"
+    (output / "BDMV").mkdir(parents=True)
+
+    with pytest.raises(ExistingTreeError) as excinfo:
+        build_job_plan(
+            request_for(tmp_path, output_dir=output), runner, temp_dir=tmp_path / "tmp"
+        )
+
+    assert runner.calls == []  # refused before any tool runs
+    assert excinfo.value.marker == Path("BDMV")
+    assert "already contains an AVCHD structure" in str(excinfo.value)
 
 
 def test_build_job_plan_can_allow_a_non_standard_resolution(tmp_path: Path) -> None:

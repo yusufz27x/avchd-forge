@@ -98,7 +98,8 @@ folder, and the source can also be dragged onto the window.
 * **Output** — pick a folder or a detected removable drive from the combo. The
   badge shows `FAT32`, `exFAT`, `NTFS`, … and inline warnings tell you when the
   split setting and the filesystem disagree (V15) or when the estimate may not
-  fit in the free space (V16). Warnings never block; a read-only target does.
+  fit in the free space (V16). Warnings never block; a read-only target or a
+  folder that already holds an AVCHD tree does (V20).
 * **Run bar** — Start/Cancel, current stage, progress bar and elapsed time. When
   the run ends the bar says what happened; success offers *Open output folder*,
   failure offers the kept *Open temp dir*.
@@ -149,10 +150,36 @@ parts still play. The output directory gets the standard structure:
        /CERTIFICATE/…
 ```
 
+On a USB drive the PS3 looks for this tree inside a folder called `AVCHD` at the
+root of the device — point the app at `<drive>/AVCHD` rather than the drive
+itself.
+
+## Several movies on one drive
+
+A stock PS3 recognises **one AVCHD structure per drive**, so the folder the app
+writes into must hold exactly one title. To keep more movies on the same stick,
+give each one its own folder and rename the folder of the movie you want to
+watch to `AVCHD`:
+
+```
+<drive>/AVCHD/       ← the movie the PS3 sees now (BDMV/ + CERTIFICATE/)
+<drive>/Title B/     ← full tree, waiting
+<drive>/Title C/     ← full tree, waiting
+```
+
+Renaming `AVCHD` to something else and the wanted folder to `AVCHD` is instant
+on FAT32 (only the directory entry changes); re-insert the drive and the PS3
+shows the new title. avchd-forge refuses to start when the chosen output folder
+already contains a `BDMV` tree (`BDMV/` or `AVCHD/BDMV/`) — tsMuxeR reuses fixed
+file names (`index.bdmv`, `00000.m2ts`, …) and a second run would overwrite the
+first movie. Multi-title discs (several playlists inside one BDMV, the
+multiAVCHD approach) are not supported.
+
 ## Troubleshooting
 
 * **Start refuses to enable** — look at the status bar: tools unresolved, no
-  source or an unusable one, no output folder, or a read-only target.
+  source or an unusable one, no output folder, a read-only target, or an output
+  folder that already holds an AVCHD tree (choose an empty folder).
 * **A run failed** — the temp directory is kept; *Open temp dir* shows the
   intermediate files, and the log has the exact argv, working directory, exit
   code and full output of the failing command.

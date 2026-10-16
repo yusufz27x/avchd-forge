@@ -478,6 +478,36 @@ def test_fat32_with_splitting_off_warns(tmp_path: Path) -> None:
     assert "Enable splitting" in window.output_warning.text()
 
 
+def test_an_existing_avchd_tree_blocks_start_and_explains_why(tmp_path: Path) -> None:
+    window, _runner, _source = prepared_window(tmp_path)
+    (tmp_path / "out" / "BDMV").mkdir(parents=True)
+
+    window.set_output_dir(tmp_path / "out")  # same folder: re-assessed explicitly
+
+    assert not window.start_button.isEnabled()
+    assert "already contains an AVCHD structure" in window.start_button.toolTip()
+    assert "already contains an AVCHD structure" in window.output_warning.text()
+    report = window.target_report()
+    assert report is not None and not report.ok
+    assert window.start() is False
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0,
+    reason="the read-only check uses POSIX modes and root ignores them",
+)
+def test_a_read_only_target_blocks_start(tmp_path: Path) -> None:
+    window, _runner, _source = prepared_window(tmp_path)
+    output = tmp_path / "out"
+    output.mkdir()
+    output.chmod(0o500)
+
+    window.set_output_dir(output)
+
+    assert not window.start_button.isEnabled()
+    assert "not writable" in window.start_button.toolTip()
+
+
 def test_a_drive_combo_entry_sets_the_output_folder(tmp_path: Path) -> None:
     window, _runner, _source = prepared_window(tmp_path)
     window.set_drives(
@@ -574,6 +604,21 @@ def test_start_runs_the_job_and_reports_success(tmp_path: Path) -> None:
     assert window.temp_dir is None
     assert window._settings.last_output_dir() == tmp_path / "out"
     assert "done: 1 stream part written" in window.log_pane.text()
+
+
+def test_a_finished_run_blocks_the_same_output_folder_again(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    script_probe(runner)
+    window = make_window(tmp_path, runner)
+    window.open_source(write_source(tmp_path))
+    window.set_output_dir(tmp_path / "out")
+    script_success(runner)
+    runner.responses.pop(0)  # the probe already happened through the UI
+
+    assert window.start()
+
+    assert not window.start_button.isEnabled()
+    assert "already contains an AVCHD structure" in window.output_warning.text()
 
 
 def test_cancel_can_be_pressed_from_the_mux_response(tmp_path: Path) -> None:

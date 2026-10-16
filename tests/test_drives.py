@@ -14,12 +14,14 @@ from pathlib import Path
 import pytest
 
 from avchdforge.drives import (
+    EXISTING_TREE_ERROR,
     FAT32_SPLIT_WARNING,
     FREE_SPACE_WARNING,
     LSBLK_ARGV,
     Drive,
     TargetReport,
     assess_target,
+    existing_tree,
     find_drive,
     format_size,
     free_bytes,
@@ -424,6 +426,40 @@ def test_assess_target_accepts_a_directory_that_does_not_exist_yet(tmp_path: Pat
 
     assert report.writable is None
     assert report.ok
+
+
+def test_assess_target_blocks_an_existing_bdmv_tree(tmp_path: Path) -> None:
+    target = tmp_path / "out"
+    (target / "BDMV").mkdir(parents=True)
+
+    report = assess_target(target, drives=[])
+
+    assert not report.ok and report.has_error
+    assert [issue.code for issue in report.errors] == [EXISTING_TREE_ERROR]
+    assert report.messages()[0] == report.errors[0].message
+    assert "already contains an AVCHD structure" in report.errors[0].message
+    assert "overwrite" in report.errors[0].message
+
+
+def test_assess_target_blocks_the_camcorder_layout_too(tmp_path: Path) -> None:
+    target = tmp_path / "out"
+    (target / "AVCHD" / "BDMV").mkdir(parents=True)
+
+    report = assess_target(target, drives=[])
+
+    assert not report.ok
+    assert report.errors[0].code == EXISTING_TREE_ERROR
+    assert str(Path("AVCHD") / "BDMV") in report.errors[0].message
+
+
+def test_existing_tree_only_reports_a_real_tree(tmp_path: Path) -> None:
+    assert existing_tree(tmp_path) is None
+
+    (tmp_path / "AVCHD").mkdir()
+    assert existing_tree(tmp_path) is None  # an empty AVCHD folder clobbers nothing
+
+    (tmp_path / "AVCHD" / "BDMV").mkdir()
+    assert existing_tree(tmp_path) == Path("AVCHD") / "BDMV"
 
 
 def test_target_report_is_a_plain_value() -> None:

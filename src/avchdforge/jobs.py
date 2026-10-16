@@ -37,8 +37,10 @@ from pathlib import Path
 from PySide6 import QtCore
 
 from .backend import JobOutcome, JobStage, execute_plan
+from .drives import existing_tree
 from .errors import (
     AvchdForgeError,
+    ExistingTreeError,
     JobCancelled,
     MuxError,
     PrepError,
@@ -66,6 +68,7 @@ RunnerFactory = Callable[[], Runner]
 #: Human title per failure type; anything not matched is an internal error.
 _FAILURE_TITLES: tuple[tuple[type[BaseException], str], ...] = (
     (ValidationFailed, "This file cannot be used"),
+    (ExistingTreeError, "The output folder cannot be used"),
     (ProbeError, "Could not read the input file"),
     (PrepError, "A preparation step failed"),
     (MuxError, "tsMuxeR failed"),
@@ -193,8 +196,13 @@ def build_job_plan(request: JobRequest, runner: Runner, *, temp_dir: Path) -> Jo
     The only reason this is not in :mod:`avchdforge.plan` is the validation
     ordering: the GUI shows the issues before a job starts, so validation runs
     first here and its report is reused by ``build_plan`` instead of being
-    computed twice.
+    computed twice. An output folder that already holds an AVCHD tree is
+    refused before any tool runs (V20).
     """
+    output_dir = Path(request.output_dir).expanduser()
+    marker = existing_tree(output_dir)
+    if marker is not None:
+        raise ExistingTreeError(output_dir, marker)
     media = probe(request.source, runner, tool=request.ffprobe)
     selection = (
         request.selection if request.selection is not None else default_selection(media)
