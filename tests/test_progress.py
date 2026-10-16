@@ -1,15 +1,16 @@
 """Unit tests for :mod:`avchdforge.progress` (tool output → a 0..1 fraction).
 
 The fixtures are real captures: ``tsmuxer/mux_success.txt`` is the complete stdout
-of a successful mux, ``tools/ffmpeg_progress_subtitle.txt`` is a whole
-``-progress pipe:1`` stream.
+of a successful small mux, ``tsmuxer/mux_in_place.txt`` the stdout of a 1.7 GB mux
+(the ``ESC M``-prefixed in-place reports included), ``tools/ffmpeg_progress_subtitle.txt``
+a whole ``-progress pipe:1`` stream.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from avchdforge.process import ProgressScanner
+from avchdforge.process import ProgressScanner, strip_ansi_sequences
 from avchdforge.progress import (
     MUX_SUCCESS_SENTINEL,
     FfmpegProgress,
@@ -27,6 +28,11 @@ from .conftest import load_text
 @pytest.fixture()
 def mux_output() -> str:
     return load_text("mux_success.txt")
+
+
+@pytest.fixture()
+def mux_output_in_place() -> str:
+    return load_text("mux_in_place.txt")
 
 
 @pytest.fixture()
@@ -48,6 +54,11 @@ def ffmpeg_progress() -> str:
         ("7,5% complete", 7.5),
         ("  12.3 % complete", 12.3),
         ("0.0% complete", 0.0),
+        # tsMuxeR rewrites its report in place: on Linux every report after the
+        # first one that followed a log message is prefixed with ESC M (_reverse
+        # index_, METADemuxer::lineBack). The bar must still follow it.
+        ("\x1bM24.5% complete", 24.5),
+        ("\x1bM\x1b[0m99.0% complete", 99.0),
     ],
 )
 def test_parse_percent_accepts_the_variants_tsmuxer_prints(line, expected):
@@ -85,6 +96,43 @@ def test_scanner_walks_a_real_mux_to_completion(mux_output):
     assert scanner.frames == 96
     assert scanner.success is True
     assert scanner.done is True
+
+
+def test_scanner_walks_consecutive_in_place_reports():
+    """Only the first report after a log line has no ``ESC M`` prefix."""
+    scanner = TsmuxerScanner()
+
+    fractions = scan_lines(
+        [
+            "0.0% complete",
+            "H264 bitstream changed: insert SPS/PPS units",
+            "\x1bM24.5% complete",
+            "\x1bM49.0% complete",
+            "\x1bM73.5% complete",
+            "\x1bM98.0% complete",
+            "100.0% complete",
+        ],
+        scanner,
+    )
+
+    assert fractions == pytest.approx([0.0, 0.245, 0.49, 0.735, 0.98, 1.0])
+    assert scanner.percent == 100.0
+    assert scanner.done
+
+
+def test_scanner_follows_a_real_in_place_capture(mux_output_in_place):
+    """A 36-line capture of a 1.7 GB mux: every report must move the bar."""
+    scanner = TsmuxerScanner()
+
+    fractions = scan_lines(mux_output_in_place.splitlines(), scanner)
+
+    # 24 reports in the capture, all but the last in ascending order; before the
+    # fix the scanner saw only the two escape-free ones (0.0 and 4.6) and froze.
+    assert len(fractions) == 24
+    assert fractions[0] == 0.0
+    assert fractions[-1] == 1.0
+    assert fractions[:-1] == sorted(fractions[:-1])
+    assert scanner.success is True
 
 
 def test_scanner_is_a_progress_scanner():
@@ -216,6 +264,13 @@ def test_scan_lines_and_last_fraction_compose(mux_output):
     assert last_fraction(values) == 1.0
     assert last_fraction([]) is None
     assert last_fraction([None, None]) is None
+
+
+def test_strip_ansi_sequences_removes_the_terminal_furniture():
+    assert strip_ansi_sequences("") == ""
+    assert strip_ansi_sequences("plain\n") == "plain\n"
+    assert strip_ansi_sequences("\x1bM7.0% complete\n") == "7.0% complete\n"
+    assert strip_ansi_sequences("\x1b[31mred\x1b[0m\n") == "red\n"
 
 
 def test_the_runner_feeds_the_scanner(mux_output, runner):

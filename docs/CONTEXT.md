@@ -65,6 +65,25 @@ High@4.1 + two AC-3 tracks + a small SRT); `scratch/` holds throwaway mux output
 * Success is signalled by the line `Mux successful complete`, progress by
   `NN.N% complete` lines (e.g. `22.2% complete`, `100.0% complete`) **(verified)**.
   A missing meta file exits `255`; a missing *input* file exits non-zero too.
+* On Linux, every progress report after the first one that followed a log
+  message is prefixed with **`ESC M`** — the reverse-index sequence
+  `METADemuxer::lineBack` prints so an interactive terminal overwrites the
+  previous report instead of scrolling **(verified)**: a 1.7 GB mux to tmpfs on
+  2.7.0 printed 24 `% complete` reports; only the ones a log line preceded (the
+  first two and the final `100.0%`) were escape-free, the rest were shaped
+  `\x1bM24.5% complete`. A parser that strips only whitespace therefore follows a
+  long mux for exactly one report — the log pane shows the percentages while the
+  progress bar freezes. `process.strip_ansi_sequences` strips the sequences at
+  the line boundary of both runners (log, evidence and scanner all see plain
+  text) and the scanners forgive any that still arrive
+  (`tests/test_qt_process.py` drives a child that prints them).
+* The percentage is **input processed / input size** (`METADemuxer::updateReport`
+  → `getDemuxedSize`), not output bytes; the output is written by an async writer
+  whose queue is capped at 400 MB (`BufferedFileWriter`), and the mux loop pauses
+  once 256 MB are queued (`MuxerManager::asyncWriteBlock`) **(source-verified on
+  2.7.0)**. Reading is therefore throttled along with the writes and the report
+  tracks the transfer, with the final `Flushing write buffer` drain the one
+  stretch it cannot show.
 
 ### 2.2 tsMuxeR failure modes that force output verification
 

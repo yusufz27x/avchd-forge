@@ -174,6 +174,42 @@ def test_scanner_sees_both_streams(qt_runner: QProcessRunner) -> None:
     assert fractions[-1] == 1.0
 
 
+def test_in_place_terminal_reports_are_cleaned_and_tracked(
+    qt_runner: QProcessRunner,
+) -> None:
+    """tsMuxeR's ``ESC M`` prefix must not hide a report from the progress bar."""
+    lines: list[str] = []
+    fractions: list[float] = []
+    scanner = TsmuxerScanner()
+
+    result = qt_runner.run(
+        child(
+            "print('0.0% complete', flush=True)\n"
+            "print('\\x1bM24.5% complete', flush=True)\n"
+            "print('\\x1bM49.0% complete', flush=True)\n"
+            "print('Mux successful complete', flush=True)\n"
+        ),
+        on_line=lines.append,
+        scanner=scanner,
+        on_progress=fractions.append,
+    )
+
+    assert result.returncode == 0
+    # the log pane and the evidence lose the reverse-index sequence ...
+    assert lines == [
+        "0.0% complete\n",
+        "24.5% complete\n",
+        "49.0% complete\n",
+        "Mux successful complete\n",
+    ]
+    assert result.stdout == (
+        "0.0% complete\n24.5% complete\n49.0% complete\nMux successful complete\n"
+    )
+    # ... and the scanner follows every report, not just the first
+    assert pytest.approx([0.0, 0.245, 0.49, 1.0]) == fractions
+    assert scanner.success
+
+
 def test_rerun_after_cancel_clears_the_flag(qt_runner: QProcessRunner) -> None:
     qt_runner.cancel()  # idle cancel is a no-op that still raises the flag
     assert qt_runner.cancelled

@@ -15,6 +15,7 @@ without spawning anything.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import threading
 from collections.abc import Callable, Sequence
@@ -24,6 +25,21 @@ from typing import Any, Protocol, runtime_checkable
 
 LineCallback = Callable[[str], None]
 ProgressCallback = Callable[[float | None], None]
+
+#: ANSI/terminal control sequences a tool may print around in-place status
+#: output. tsMuxeR on Linux prefixes every ``NN.N% complete`` report after the
+#: first one that follows a log message with ``ESC M`` — *reverse index*, the
+#: ``METADemuxer::lineBack`` trick that makes a terminal overwrite the previous
+#: report; CSI colour sequences would appear if a tool believed it was on a
+#: terminal. A log pane has no cursor to move and the progress parsers match
+#: from the start of the line, so the sequences are stripped at the boundary
+#: where bytes become lines.
+_ANSI_SEQUENCE = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|[@-_])")
+
+
+def strip_ansi_sequences(text: str) -> str:
+    """Remove terminal control sequences; every printable byte is kept."""
+    return _ANSI_SEQUENCE.sub("", text or "")
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +141,7 @@ class SubprocessRunner:
         stderr_lines: list[str] = []
 
         def handle(stream_name: str, line: str) -> None:
+            line = strip_ansi_sequences(line)
             target = stdout_lines if stream_name == "stdout" else stderr_lines
             target.append(line)
             if on_line is not None:
@@ -193,10 +210,15 @@ class _LineBuffer:
     """Accumulates one text stream and produces complete lines.
 
     Lines keep their trailing newline, exactly like iterating a text-mode stream in
-    :class:`SubprocessRunner`, so callbacks see identical bytes from both runners.
+    :class:`SubprocessRunner`, so callbacks see identical text from both runners.
     CRLF and lone CR are folded to ``\\n`` first (universal-newline behaviour); the
     only mismatch left is a CR at the very end of one read and a LF at the start of
     the next, which no tool in this pipeline produces.
+
+    Terminal control sequences are stripped as the lines are formed: tsMuxeR
+    prefixes its in-place progress reports with ``ESC M``, and neither the log
+    pane nor the progress parsers want the cursor furniture (the collected
+    ``CompletedRun`` text is assembled from these same lines).
     """
 
     __slots__ = ("_pending", "lines")
@@ -210,7 +232,7 @@ class _LineBuffer:
         self._pending += text.replace("\r\n", "\n").replace("\r", "\n")
         complete = self._pending.split("\n")
         *rows, self._pending = complete
-        lines = [f"{row}\n" for row in rows]
+        lines = [strip_ansi_sequences(f"{row}\n") for row in rows]
         self.lines.extend(lines)
         return lines
 
@@ -218,7 +240,7 @@ class _LineBuffer:
         """Release a trailing line that never got its newline."""
         if not self._pending:
             return []
-        tail, self._pending = self._pending, ""
+        tail, self._pending = strip_ansi_sequences(self._pending), ""
         self.lines.append(tail)
         return [tail]
 
@@ -294,6 +316,7 @@ class QProcessRunner:
         state: dict[str, Any] = {"done": False, "start_error": None}
 
         def handle(line: str) -> None:
+            # ``_LineBuffer`` already stripped terminal control sequences.
             if on_line is not None:
                 on_line(line)
             elif self.echo is not None:
@@ -390,4 +413,5 @@ __all__ = [
     "QProcessRunner",
     "Runner",
     "SubprocessRunner",
+    "strip_ansi_sequences",
 ]

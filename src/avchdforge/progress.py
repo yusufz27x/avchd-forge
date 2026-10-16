@@ -8,7 +8,10 @@ Captured reality (``tests/data/tools``, ``tests/data/tsmuxer``):
 
 * tsMuxeR writes everything to **stdout** — ``7.0% complete`` lines, an
   informational ``Processed N video frames``, and the success sentinel
-  ``Mux successful complete``;
+  ``Mux successful complete``. On Linux every report after the first one that
+  followed a log message is prefixed with ``ESC M`` (reverse index, so a
+  terminal overwrites the previous report); the scanners strip control
+  sequences before matching;
 * ffmpeg is asked for ``-progress pipe:1 -nostats``, which prints ``key=value``
   blocks on stdout ending in ``progress=continue``/``progress=end``.
 
@@ -23,7 +26,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Final
 
-from .process import ProgressScanner
+from .process import ProgressScanner, strip_ansi_sequences
 
 #: Line that carries tsMuxeR's completion percentage.
 _TSMUXER_PERCENT = re.compile(r"^(\d+(?:[.,]\d+)?)\s*%\s*complete\b", re.IGNORECASE)
@@ -44,9 +47,11 @@ MUX_SUCCESS_SENTINEL: Final[str] = "Mux successful complete"
 def parse_percent(text: str) -> float | None:
     """``"7.0% complete"`` → ``7.0``; anything else → ``None``.
 
-    Accepts the comma decimal separator some locales/builds print.
+    Accepts the comma decimal separator some locales/builds print, and ignores
+    the terminal control sequences tsMuxeR wraps around in-place reports
+    (``ESC M``, see :func:`~avchdforge.process.strip_ansi_sequences`).
     """
-    match = _TSMUXER_PERCENT.match((text or "").strip())
+    match = _TSMUXER_PERCENT.match(strip_ansi_sequences(text or "").strip())
     if not match:
         return None
     value = float(match.group(1).replace(",", "."))
@@ -73,7 +78,7 @@ class TsmuxerScanner:
 
     def feed(self, line: str) -> float | None:
         """Consume one output line; return the fraction 0..1 when it moved."""
-        text = (line or "").strip()
+        text = strip_ansi_sequences(line or "").strip()
         if not text:
             return None
         if MUX_SUCCESS_SENTINEL in text:
@@ -146,7 +151,7 @@ class FfmpegProgressScanner:
     blocks: list[FfmpegProgress] = field(default_factory=list)
 
     def feed(self, line: str) -> float | None:
-        text = (line or "").strip()
+        text = strip_ansi_sequences(line or "").strip()
         match = _FFMPEG_KEY_VALUE.match(text)
         if not match:
             # ffmpeg -v error should keep stdout clean, but a stray warning on
