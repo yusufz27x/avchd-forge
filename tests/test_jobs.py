@@ -32,6 +32,7 @@ from avchdforge.jobs import (
     describe_media,
     describe_outcome,
 )
+from avchdforge.plan import PlanOptions
 from avchdforge.probe import parse_ffprobe_json
 from avchdforge.selection import TrackSelection
 
@@ -543,6 +544,27 @@ def test_build_job_plan_raises_before_the_detection_run(tmp_path: Path) -> None:
         build_job_plan(request_for(tmp_path), runner, temp_dir=tmp_path / "tmp")
 
     assert [Path(call[0]).name for call in runner.calls] == ["ffprobe"]
+
+
+def test_build_job_plan_can_allow_a_non_standard_resolution(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    cropped = _json(output_payload(vstream(0, height=1036), astream(1)))
+    runner.add_stdout(cropped, match="ffprobe")
+    runner.add_stdout(cropped, match="ffprobe")
+    runner.add_stdout(DETECTION, match=".mkv")
+
+    with pytest.raises(ValidationFailed):
+        build_job_plan(request_for(tmp_path), runner, temp_dir=tmp_path / "tmp")
+
+    plan = build_job_plan(
+        request_for(tmp_path, options=PlanOptions(allow_nonstandard_resolution=True)),
+        runner,
+        temp_dir=tmp_path / "tmp",
+    )
+
+    assert plan.report.ok
+    assert "V4" in {issue.code for issue in plan.report.warnings}
+    assert [track.track_id for track in plan.tracks] == [1, 2]
 
 
 def test_build_job_plan_uses_defaults_when_no_selection_is_given(tmp_path: Path) -> None:

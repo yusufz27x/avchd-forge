@@ -36,15 +36,23 @@ def validate_container(
     media: MediaInfo,
     *,
     check_extension: bool = True,
+    allow_nonstandard_resolution: bool = False,
     collector: IssueCollector | None = None,
 ) -> ValidationReport:
-    """Everything that can be decided by looking at the source alone."""
+    """Everything that can be decided by looking at the source alone.
+
+    ``allow_nonstandard_resolution`` is the Preferences opt-in: V4 drops from an
+    error to a warning, so cropped 1080p releases (1920x1036 and friends) can be
+    tried on the PS3 without pretending they are AVCHD-compliant.
+    """
     collect = collector or IssueCollector()
 
     if check_extension:
         _check_extension(media, collect)
 
-    _check_video_streams(media, collect)
+    _check_video_streams(
+        media, collect, allow_nonstandard_resolution=allow_nonstandard_resolution
+    )
     _check_audio_streams(media, collect)
     _check_subtitle_streams(media, collect)
 
@@ -68,7 +76,12 @@ def _check_extension(media: MediaInfo, collect: IssueCollector) -> None:
         )
 
 
-def _check_video_streams(media: MediaInfo, collect: IssueCollector) -> None:
+def _check_video_streams(
+    media: MediaInfo,
+    collect: IssueCollector,
+    *,
+    allow_nonstandard_resolution: bool = False,
+) -> None:
     if not media.videos:
         collect.error("V2", "No video stream found. Is this really a BDRemux?")
         return
@@ -92,12 +105,22 @@ def _check_video_streams(media: MediaInfo, collect: IssueCollector) -> None:
 
         resolution = (video.width, video.height)
         if resolution not in ALLOWED_RESOLUTIONS:
-            collect.error(
-                "V4",
-                f"Video stream {video.index} is {video.resolution_label}; AVCHD requires "
-                "exactly 1920x1080 or 1280x720.",
-                video.index,
-            )
+            if allow_nonstandard_resolution:
+                collect.warning(
+                    "V4",
+                    f"Video stream {video.index} is {video.resolution_label}; AVCHD "
+                    "wants exactly 1920x1080 or 1280x720. Remuxing it anyway because "
+                    "non-standard resolutions are allowed: the PS3 usually plays "
+                    "cropped 1080p, but playback is not guaranteed.",
+                    video.index,
+                )
+            else:
+                collect.error(
+                    "V4",
+                    f"Video stream {video.index} is {video.resolution_label}; AVCHD requires "
+                    "exactly 1920x1080 or 1280x720.",
+                    video.index,
+                )
 
         if video.level is None:
             collect.warning(
@@ -291,11 +314,17 @@ def validate_all(
     decisions: dict[int, AudioDecision] | None = None,
     extra_issues: Iterable[Issue] = (),
     check_extension: bool = True,
+    allow_nonstandard_resolution: bool = False,
 ) -> ValidationReport:
     """Container + selection + whatever the caller learned from the target drive."""
     decisions = decisions if decisions is not None else decide_audio_all(media)
     collector = IssueCollector()
-    validate_container(media, check_extension=check_extension, collector=collector)
+    validate_container(
+        media,
+        check_extension=check_extension,
+        allow_nonstandard_resolution=allow_nonstandard_resolution,
+        collector=collector,
+    )
     validate_selection(media, selection, decisions=decisions, collector=collector)
     collector.issues.extend(extra_issues)
     return collector.report()

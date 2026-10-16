@@ -52,6 +52,7 @@ def test_defaults(prefs: AppSettings) -> None:
     assert prefs.temp_dir() is None  # -> the system temp directory
     assert prefs.split_enabled
     assert prefs.split_size_mb() == DEFAULT_SPLIT_SIZE_MB
+    assert not prefs.allow_nonstandard_resolution
     assert prefs.audio_priority() == ()
     assert prefs.subtitle_priority() == ()
     assert not prefs.keep_temp_on_success
@@ -78,16 +79,20 @@ def test_boolean_and_number_round_trips(prefs: AppSettings) -> None:
     prefs.set_log_visible(False)
     prefs.set_split_enabled(False)
     prefs.set_split_size_mb(1000)
+    prefs.set_allow_nonstandard_resolution(True)
     prefs.set_keep_temp_on_success(True)
     prefs.set_keep_temp_on_failure(False)
 
     assert not prefs.log_visible
     assert not prefs.split_enabled
+    assert prefs.allow_nonstandard_resolution
     assert prefs.keep_temp_on_success
     assert not prefs.keep_temp_on_failure
 
     prefs.set_split_enabled(True)
     assert prefs.split_size_mb() == 1000
+    prefs.set_allow_nonstandard_resolution(False)
+    assert not prefs.allow_nonstandard_resolution
 
 
 def test_values_are_coerced_whatever_the_backend_stored(prefs: AppSettings) -> None:
@@ -185,6 +190,13 @@ def test_plan_options_defaults(prefs: AppSettings) -> None:
     assert options.mux.split_size_mb == DEFAULT_SPLIT_SIZE_MB
     assert options.subtitle_style == SubtitleStyle()
     assert not options.capabilities.has_pgs_encoder
+    assert options.allow_nonstandard_resolution is False
+
+
+def test_plan_options_carry_the_non_standard_resolution_opt_in(prefs: AppSettings) -> None:
+    prefs.set_allow_nonstandard_resolution(True)
+
+    assert prefs.plan_options().allow_nonstandard_resolution is True
 
 
 def test_plan_options_use_the_resolved_toolchain(prefs: AppSettings) -> None:

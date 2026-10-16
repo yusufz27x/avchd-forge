@@ -103,6 +103,29 @@ def test_v4_accepts_the_two_legal_resolutions(resolution):
     assert "V4" not in codes(validate_container(media))
 
 
+@pytest.mark.parametrize("resolution", [(1920, 1036), (1920, 1038), (1920, 800)])
+def test_v4_becomes_a_warning_when_non_standard_resolutions_are_allowed(resolution):
+    width, height = resolution
+    media = build_media([vstream(width=width, height=height), astream()])
+
+    report = validate_container(media, allow_nonstandard_resolution=True)
+
+    assert report.ok is True
+    assert "V4" in codes(report, "warning")
+    assert "V4" not in codes(report, "error")
+    assert "1920x1080 or 1280x720" in issue(report, "V4").message
+    assert "not guaranteed" in issue(report, "V4").message
+
+
+def test_the_opt_in_does_not_excuse_other_errors():
+    media = build_media([vstream(width=1920, height=1036), vstream(index=2)])
+
+    report = validate_container(media, allow_nonstandard_resolution=True)
+
+    assert report.ok is False
+    assert "V2" in codes(report, "error")
+
+
 def test_v5_warns_above_level_41():
     media = build_media([vstream(level=51), astream()])
     report = validate_container(media)
@@ -315,6 +338,17 @@ def test_validate_all_reports_container_errors(ac3_media):
 
     bad = build_media([vstream(), astream()], path="movie.avi")
     assert validate_all(bad, TrackSelection(audio=(1,))).ok is False
+
+
+def test_validate_all_passes_the_non_standard_resolution_opt_in():
+    media = build_media([vstream(width=1920, height=1036), astream()])
+
+    assert validate_all(media, TrackSelection(audio=(1,))).ok is False
+    allowed = validate_all(
+        media, TrackSelection(audio=(1,)), allow_nonstandard_resolution=True
+    )
+    assert allowed.ok is True
+    assert "V4" in {item.code for item in allowed.warnings}
 
 
 def test_issue_and_report_helpers(ac3_media):

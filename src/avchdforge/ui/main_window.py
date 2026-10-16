@@ -476,12 +476,31 @@ class MainWindow(QtWidgets.QMainWindow):
             subtitle_language_priority=self._settings.subtitle_priority(),
         )
 
+    def _validate(self, media: MediaInfo, selection: TrackSelection) -> ValidationReport:
+        """``validate_all`` with the compatibility choices from Preferences."""
+        return validate_all(
+            media,
+            selection,
+            allow_nonstandard_resolution=self._settings.allow_nonstandard_resolution,
+        )
+
+    def _revalidate_report(self) -> None:
+        """Re-check the current selection after a preference that changes V4's severity."""
+        if self._outcome is None:
+            return
+        selection = self.track_view.selection()
+        self._report = self._validate(self._outcome.media, selection)
+        self.track_view.set_report(self._report)
+        self._update_actions()
+        self._update_status()
+        self._on_line("[avchd-forge] resolution policy changed — re-checked\n")
+
     def _reselect_defaults(self) -> None:
         """Re-derive the checked tracks from the (possibly new) language priorities."""
         if self._outcome is None:
             return
         selection = self._default_selection(self._outcome.media)
-        self._report = validate_all(self._outcome.media, selection)
+        self._report = self._validate(self._outcome.media, selection)
         self.track_view.set_media(self._outcome.media, selection, self._report)
         self._update_actions()
         self._update_status()
@@ -662,7 +681,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_probed(self, outcome: ProbeOutcome) -> None:
         self._outcome = outcome
         selection = self._default_selection(outcome.media)
-        self._report = validate_all(outcome.media, selection)
+        self._report = self._validate(outcome.media, selection)
         self.track_view.set_media(outcome.media, selection, self._report)
         self.stage_label.setText("Ready")
         self.log_pane.set_stage("")
@@ -673,7 +692,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_selection_changed(self, selection: TrackSelection) -> None:
         if self._outcome is None:
             return
-        self._report = validate_all(self._outcome.media, selection)
+        self._report = self._validate(self._outcome.media, selection)
         self.track_view.set_report(self._report)
         self._update_actions()
         self._update_status()
@@ -832,7 +851,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Edit the preferences, then redo whatever the changes made stale.
 
         Returns whether OK was pressed. ``tab`` opens straight on one of the tabs
-        (the startup gate asks for ``"tools"``; the menu opens on the first). Three
+        (the startup gate asks for ``"tools"``; the menu opens on the first). Four
         preferences have visible consequences and are acted on here; everything
         else is read when it is needed (``plan_options`` builds a fresh plan per
         job):
@@ -842,7 +861,9 @@ class MainWindow(QtWidgets.QMainWindow):
         * **language priorities** → re-derive the default selection, which is
           exactly what a priority is for;
         * **splitting** → re-assess the target, because the badge and the V15
-          warning depend on it.
+          warning depend on it;
+        * **non-standard resolutions** → re-validate, because V4's severity (and
+          with it Start's enabled-ness) depends on it.
         """
         before_tools = self._settings.tool_overrides()
         before_languages = (
@@ -850,6 +871,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._settings.subtitle_priority(),
         )
         before_split = (self._settings.split_enabled, self._settings.stored_split_size_mb())
+        before_resolution = self._settings.allow_nonstandard_resolution
         dialog = PreferencesDialog(
             self._settings,
             self,
@@ -869,6 +891,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._reselect_defaults()
         if (self._settings.split_enabled, self._settings.stored_split_size_mb()) != before_split:
             self._assess_output()
+        if self._settings.allow_nonstandard_resolution != before_resolution:
+            self._revalidate_report()
         return True
 
     def show_tool_versions(self) -> None:

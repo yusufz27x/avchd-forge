@@ -199,7 +199,11 @@ def build_job_plan(request: JobRequest, runner: Runner, *, temp_dir: Path) -> Jo
     selection = (
         request.selection if request.selection is not None else default_selection(media)
     )
-    report = validate_all(media, selection)
+    report = validate_all(
+        media,
+        selection,
+        allow_nonstandard_resolution=request.options.allow_nonstandard_resolution,
+    )
     if not report.ok:
         raise ValidationFailed(report)
     detection = detect_tracks(request.options.tsmuxer, request.source, runner)

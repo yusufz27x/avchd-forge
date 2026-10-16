@@ -117,6 +117,8 @@ class PlanOptions:
     mux: MuxOptions = field(default_factory=MuxOptions)
     capabilities: FfmpegCapabilities = field(default_factory=FfmpegCapabilities)
     subtitle_style: SubtitleStyle = field(default_factory=SubtitleStyle)
+    #: Preferences opt-in: non-standard video sizes are remuxed with a warning.
+    allow_nonstandard_resolution: bool = False
 
     def with_split_size(self, mb: int | None) -> PlanOptions:
         """FAT32 splitting on (default 4096 MB) or off."""
@@ -251,7 +253,12 @@ def build_plan(
     """
     plan_options = options or PlanOptions()
     decisions = decisions if decisions is not None else decide_audio_all(media)
-    report = report if report is not None else validate_all(media, selection, decisions=decisions)
+    report = report if report is not None else validate_all(
+        media,
+        selection,
+        decisions=decisions,
+        allow_nonstandard_resolution=plan_options.allow_nonstandard_resolution,
+    )
     if not report.ok:
         raise ValidationFailed(report)
 
@@ -447,7 +454,12 @@ def plan_for_source(
         audio_language_priority=language_priority,
         subtitle_language_priority=subtitle_language_priority,
     )
-    report = validate_all(media, chosen, extra_issues=list(extra_issues))
+    report = validate_all(
+        media,
+        chosen,
+        extra_issues=list(extra_issues),
+        allow_nonstandard_resolution=plan_options.allow_nonstandard_resolution,
+    )
     if not report.ok:
         raise ValidationFailed(report)
     detection = detect_tracks(plan_options.tsmuxer, path, runner)

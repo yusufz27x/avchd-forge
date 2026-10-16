@@ -52,7 +52,7 @@ Golden fixtures live in `tests/data/ffprobe/`.
 | V1 | input extension ∈ {`.mkv`, `.ts`, `.m2ts`, `.mpg`} | error |
 | V2 | exactly one video stream | error |
 | V3 | video codec is `h264`/AVC (HEVC, MPEG-2, VC-1 … rejected) | error |
-| V4 | resolution is exactly 1920×1080 or 1280×720 | error |
+| V4 | resolution is exactly 1920×1080 or 1280×720 | error (warning with the Preferences opt-in) |
 | V5 | H.264 level ≤ 4.1 (level 4.2/5.x allowed but flagged) | warning |
 | V6 | 1080 line frame rate ≤ 30 (29.97) and 720 line frame rate ≤ 60 (59.94) | warning |
 | V7 | `field_order` interleaved/`tt`/`bb` (interlaced input) | warning |

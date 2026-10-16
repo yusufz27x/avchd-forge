@@ -257,6 +257,7 @@ from the default run (`567 passed, 2 deselected`) **(verified)**:
 | D17 | 2026-10-15 | Start is blocked only by missing tools, unusable media, no output folder or a read-only target; V15/V16 target warnings never block; the free-space estimate is `int(media.size_bytes * OUTPUT_OVERHEAD)` until a `JobPlan` exists | warnings must inform, not refuse (the brief), and the source size is the only estimate available before the plan is built; the mux re-packages the same streams, so the source size is the right ballpark |
 | D18 | 2026-10-15 | The startup gate is a `QMessageBox` that answers with a plain string (`recheck` / `preferences` / `continue` / `quit`); *Continue* exists **only** when the report is usable, the searched locations live in the details area, and anything that is not one of the buttons (Esc, the window manager) means *quit*; `main()` exits `1` when the gate is quit | a warned-but-working toolchain (old ffmpeg) must be continuable while a missing tsMuxeR must not, and guessing "continue" on a broken toolchain produces a half-written disc with no explanation; strings keep the loop drivable from `main()` and from tests without a modal event loop |
 | D19 | 2026-10-15 | Preferences edits *stored* state and never adopts it before OK: `MainWindow.check_tools(overrides, *, adopt=False)` answers without touching the window (so an unsaved typo cannot disable Start), and the split size is read/written as `AppSettings.stored_split_size_mb()` — independent of `split_enabled` — with the spin's maximum derived from `(FAT32_MAX_BYTES - SPLIT_OVERSHOOT_ALLOWANCE) // SPLIT_MB_BYTES` | an open dialog is not a decision yet; and editing the *effective* split size (which is `None` while splitting is off) reset a custom value to the default on every open-and-OK — the same reasoning as "V15/V16 inform, they do not block" |
+| D20 | 2026-10-16 | A non-standard video resolution stays a hard V4 error by default; the Muxing-tab preference `mux/allow_nonstandard_resolution` downgrades it to a warning, and the flag travels in `PlanOptions` so `build_job_plan`/`plan_for_source`/`build_plan` re-validate with the same policy; changing it re-checks the loaded source in `open_preferences` | cropped 1.85:1 BDRemux releases (1920x1036/1038) are common and often play on the PS3, but they are outside AVCHD and cannot be padded losslessly (that needs a re-encode); a default-off opt-in keeps the strict guarantee while letting the user take the risk knowingly |
 
 ## 4. Open items
 
@@ -264,6 +265,10 @@ from the default run (`567 passed, 2 deselected`) **(verified)**:
   the detection layout — the parser is deliberately lenient about spacing.
 * AVCHD legality of AAC and of level 4.2 is treated as a warning, not an error
   (PS3 plays both); revisit only if users report rejections.
+* Non-standard resolutions ride the same philosophy behind the default-off
+  `mux/allow_nonstandard_resolution` opt-in (D20). The PS3 verdict is
+  unverified — ideally one cropped (1920x1036/1038) sample gets tested live and
+  the outcome recorded here.
 * Core extraction cannot be exercised end-to-end with generated media: ffmpeg's
   own `eac3` encoder writes no AC-3 core (so `eac3_core` has nothing to emit,
   checked on 7.1.5) and there is no DTS-HD or TrueHD *encoder* at all. Those two
