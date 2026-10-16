@@ -23,6 +23,8 @@ from avchdforge.backend import (
     check_output_tree,
     check_stream_composition,
     execute_plan,
+    find_streams,
+    rename_tree_for_usb,
     verify_output,
 )
 from avchdforge.errors import JobCancelled, MuxError, VerificationError
@@ -160,9 +162,13 @@ def fake_tree(
 
 
 def mux_json_runner(runner: FakeRunner, streams: list[dict[str, Any]] | None = None) -> None:
-    """Script a run: tsMuxeR success followed by the probe of the produced file."""
+    """Script a run: tsMuxeR success followed by the probe of the produced file.
+
+    ``execute_plan`` renames the tree before verifying, so the output probe is an
+    ffprobe of a ``.MTS`` (the AVCHD-on-FAT32 name).
+    """
     runner.add(FakeResponse(stdout=MUX_OK, match="tsMuxeR"))
-    runner.add_json(output_payload(*(streams or default_output_streams())), match=".m2ts")
+    runner.add_json(output_payload(*(streams or default_output_streams())), match=".MTS")
 
 
 # --------------------------------------------------------------------------
@@ -180,6 +186,27 @@ def test_tree_accepts_the_avchd_layout(tmp_path: Path) -> None:
     assert any("PLAYLIST" in detail and "00000.mpls" in detail for detail in report.details)
 
 
+def test_tree_accepts_the_usb_naming(tmp_path: Path) -> None:
+    """The renamed tree (what avchd-forge ships) passes the same checks."""
+    fake_tree(tmp_path)
+    rename_tree_for_usb(tmp_path)
+
+    report = check_output_tree(tmp_path)
+
+    assert report.ok
+    assert not report.warnings
+    assert any("PLAYLIST" in detail and "00000.MPL" in detail for detail in report.details)
+
+
+def test_find_streams_sees_both_flavours(tmp_path: Path) -> None:
+    fake_tree(tmp_path)
+    assert [path.name for path in find_streams(tmp_path)] == ["00000.m2ts"]
+
+    rename_tree_for_usb(tmp_path)
+
+    assert [path.name for path in find_streams(tmp_path)] == ["00000.MTS"]
+
+
 def test_tree_rejects_a_missing_bdmv(tmp_path: Path) -> None:
     report = check_output_tree(tmp_path)
 
@@ -194,10 +221,10 @@ def test_tree_lists_missing_files_and_directories(tmp_path: Path) -> None:
     report = check_output_tree(tmp_path)
 
     joined = "\n".join(report.problems)
-    assert "MovieObject.bdmv is missing" in joined
-    assert "contains no *.mpls file" in joined
-    assert "contains no *.clpi file" in joined
-    assert "contains no *.m2ts file" in joined
+    assert "no MovieObject.bdmv or MOVIEOBJ.BDM file" in joined
+    assert "contains no *.mpls or *.MPL file" in joined
+    assert "contains no *.clpi or *.CPI file" in joined
+    assert "contains no *.m2ts or *.MTS file" in joined
 
 
 def test_tree_rejects_empty_files(tmp_path: Path) -> None:
@@ -247,6 +274,73 @@ def test_tree_allows_the_keyframe_overshoot(tmp_path: Path) -> None:
 def test_default_split_target_leaves_fat32_margin() -> None:
     """``4096MB`` is decimal in tsMuxeR; the result must fit FAT32 with room."""
     assert 4096 * SPLIT_MB_BYTES + SPLIT_OVERSHOOT_ALLOWANCE < FAT32_MAX_BYTES
+
+
+# --------------------------------------------------------------------------
+# rename_tree_for_usb
+# --------------------------------------------------------------------------
+
+
+def test_rename_tree_for_usb_maps_every_file(tmp_path: Path) -> None:
+    """Every tsMuxeR name becomes the 8.3 name a PS3 needs on FAT32, BACKUP too."""
+    bdmv = tmp_path / "BDMV"
+    for folder in ("PLAYLIST", "CLIPINF", "STREAM", "BACKUP/PLAYLIST", "BACKUP/CLIPINF"):
+        (bdmv / folder).mkdir(parents=True, exist_ok=True)
+    files = {
+        "index.bdmv": b"IDX",
+        "MovieObject.bdmv": b"MOBJ",
+        "PLAYLIST/00000.mpls": b"MPLS",
+        "CLIPINF/00000.clpi": b"CPI",
+        "STREAM/00000.m2ts": b"M2TS",
+        "BACKUP/index.bdmv": b"IDX",
+        "BACKUP/MovieObject.bdmv": b"MOBJ",
+        "BACKUP/PLAYLIST/00000.mpls": b"MPLS",
+        "BACKUP/CLIPINF/00000.clpi": b"CPI",
+    }
+    for name, content in files.items():
+        (bdmv / name).write_bytes(content)
+
+    renamed = rename_tree_for_usb(tmp_path)
+
+    expected = {
+        "INDEX.BDM": b"IDX",
+        "MOVIEOBJ.BDM": b"MOBJ",
+        "PLAYLIST/00000.MPL": b"MPLS",
+        "CLIPINF/00000.CPI": b"CPI",
+        "STREAM/00000.MTS": b"M2TS",
+        "BACKUP/INDEX.BDM": b"IDX",
+        "BACKUP/MOVIEOBJ.BDM": b"MOBJ",
+        "BACKUP/PLAYLIST/00000.MPL": b"MPLS",
+        "BACKUP/CLIPINF/00000.CPI": b"CPI",
+    }
+    assert len(renamed) == len(expected)
+    for name, content in expected.items():
+        assert (bdmv / name).read_bytes() == content, name
+    for name in files:
+        assert not (bdmv / name).exists(), name
+    # a second pass has nothing left to rename
+    assert rename_tree_for_usb(tmp_path) == ()
+
+
+def test_rename_tree_for_usb_ignores_a_missing_tree(tmp_path: Path) -> None:
+    assert rename_tree_for_usb(tmp_path) == ()
+
+
+def test_rename_tree_for_usb_refuses_to_clobber(tmp_path: Path) -> None:
+    bdmv = tmp_path / "BDMV"
+    bdmv.mkdir()
+    source = bdmv / "index.bdmv"
+    target = bdmv / "INDEX.BDM"
+    source.write_bytes(b"ours")
+    target.write_bytes(b"not ours")
+    if source.samefile(target):
+        pytest.skip("case-insensitive filesystem: the collision cannot exist")
+
+    with pytest.raises(OSError, match="refusing to overwrite"):
+        rename_tree_for_usb(tmp_path)
+
+    assert source.read_bytes() == b"ours"
+    assert target.read_bytes() == b"not ours"
 
 
 # --------------------------------------------------------------------------
@@ -358,8 +452,11 @@ def test_execute_plan_passthrough(tmp_path: Path, runner) -> None:
     outcome = execute_plan(plan, runner, on_stage=stages.append, on_progress=progress.append)
 
     assert isinstance(outcome, JobOutcome)
-    assert outcome.verified_file == plan.output_dir / "BDMV" / "STREAM" / "00000.m2ts"
+    assert outcome.verified_file == plan.output_dir / "BDMV" / "STREAM" / "00000.MTS"
     assert outcome.stream_files == (outcome.verified_file,)
+    # tsMuxeR's optical names are gone: the shipped tree is the PS3 USB flavour
+    assert (plan.output_dir / "BDMV" / "INDEX.BDM").is_file()
+    assert not (plan.output_dir / "BDMV" / "index.bdmv").exists()
     assert not outcome.warnings
     assert [stage.key for stage in stages] == ["mux", "verify", "cleanup"]
     assert runner.calls[0] == ["tsMuxeR", str(plan.meta_path), str(plan.output_dir)]
@@ -463,7 +560,7 @@ def test_execute_plan_rejects_a_missing_success_sentinel(tmp_path: Path, runner)
     plan = ac3_plan(tmp_path)
     fake_tree(plan.output_dir)
     runner.add(FakeResponse(stdout="100.0% complete\nMuxing time: 0 sec\n", match="tsMuxeR"))
-    runner.add_json(output_payload(*default_output_streams()), match=".m2ts")
+    runner.add_json(output_payload(*default_output_streams()), match=".MTS")
 
     with pytest.raises(VerificationError) as excinfo:
         execute_plan(plan, runner)
@@ -475,7 +572,7 @@ def test_execute_plan_rejects_a_dropped_track(tmp_path: Path, runner) -> None:
     plan = ac3_plan(tmp_path)
     fake_tree(plan.output_dir)
     runner.add(FakeResponse(stdout=MUX_OK, match="tsMuxeR"))
-    runner.add_json(output_payload(vstream(0), sstream(1, "hdmv_pgs_subtitle")), match=".m2ts")
+    runner.add_json(output_payload(vstream(0), sstream(1, "hdmv_pgs_subtitle")), match=".MTS")
 
     with pytest.raises(VerificationError) as excinfo:
         execute_plan(plan, runner)
@@ -489,12 +586,12 @@ def test_execute_plan_reports_an_unreadable_output(tmp_path: Path, runner) -> No
     plan = ac3_plan(tmp_path)
     fake_tree(plan.output_dir)
     runner.add(FakeResponse(stdout=MUX_OK, match="tsMuxeR"))
-    runner.add(FakeResponse(stderr="Invalid data found", returncode=1, match=".m2ts"))
+    runner.add(FakeResponse(stderr="Invalid data found", returncode=1, match=".MTS"))
 
     with pytest.raises(VerificationError) as excinfo:
         execute_plan(plan, runner)
 
-    assert any("could not inspect 00000.m2ts" in problem for problem in excinfo.value.problems)
+    assert any("could not inspect 00000.MTS" in problem for problem in excinfo.value.problems)
 
 
 def test_execute_plan_rejects_an_unsplit_output(tmp_path: Path, runner) -> None:
@@ -613,7 +710,7 @@ def test_execute_plan_keeps_temp_dir_when_check_fails(tmp_path: Path, runner) ->
     plan = ac3_plan(tmp_path)
     fake_tree(plan.output_dir)
     runner.add(FakeResponse(stdout=MUX_OK, match="tsMuxeR"))
-    runner.add_json(output_payload(vstream(0)), match=".m2ts")
+    runner.add_json(output_payload(vstream(0)), match=".MTS")
 
     with pytest.raises(VerificationError):
         execute_plan(plan, runner)

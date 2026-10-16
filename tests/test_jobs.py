@@ -159,7 +159,7 @@ def script_success(runner: FakeRunner) -> None:
     the argv wins: the source probe is ``ffprobe``, the detection pass is the only
     tsMuxeR call that mentions the source itself, the mux is the only one that
     mentions the meta file, and the output probe is the only ``ffprobe`` of a
-    ``.m2ts``.
+    ``.MTS`` (the backend renames tsMuxeR's ``.m2ts`` before verifying).
     """
 
     def write_tree(argv: list[str]) -> None:
@@ -168,7 +168,7 @@ def script_success(runner: FakeRunner) -> None:
     runner.add_stdout(PROBE_JSON_TEXT, match="ffprobe")
     runner.add_stdout(DETECTION, match=".mkv")
     runner.add(FakeResponse(stdout=MUX_OK, match="tsmuxer-meta.txt", side_effect=write_tree))
-    runner.add_stdout(_json(output_payload(vstream(0), astream(1))), match=".m2ts")
+    runner.add_stdout(_json(output_payload(vstream(0), astream(1))), match=".MTS")
 
 
 def _json(payload: dict[str, Any]) -> str:
@@ -269,8 +269,11 @@ def test_job_runs_detection_mux_and_verification(tmp_path: Path) -> None:
     assert watcher.events[-1] == "finished"
     assert watcher.failures == [] and watcher.cancellations == []
     outcome = watcher.outcomes[0]
-    assert [path.name for path in outcome.stream_files] == ["00000.m2ts"]
-    assert outcome.verified_file == output_dir / "BDMV" / "STREAM" / "00000.m2ts"
+    assert [path.name for path in outcome.stream_files] == ["00000.MTS"]
+    assert outcome.verified_file == output_dir / "BDMV" / "STREAM" / "00000.MTS"
+    # the job layer ships the AVCHD-on-FAT32 names the PS3 mounts from USB
+    assert (output_dir / "BDMV" / "INDEX.BDM").is_file()
+    assert not (output_dir / "BDMV" / "index.bdmv").exists()
     # the plan stage comes from here, the rest from the backend
     assert watcher.stage_keys == ["plan", "mux", "verify", "cleanup"]
     assert watcher.stages[0].label == PLAN_STAGE_LABEL
@@ -307,7 +310,7 @@ def test_job_runs_prep_steps_before_the_mux(tmp_path: Path) -> None:
     runner.add(FakeResponse(stdout=MUX_OK, match="tsmuxer-meta.txt", side_effect=write_tree))
     runner.add_stdout(
         _json(output_payload(vstream(0), astream(1), sstream(2, "hdmv_pgs_subtitle"))),
-        match=".m2ts",
+        match=".MTS",
     )
     job = make_job(runner)
     watcher = JobWatcher(job)
@@ -615,7 +618,7 @@ def test_describe_outcome_mentions_files_and_split_size(tmp_path: Path) -> None:
     lines = describe_outcome(watcher.outcomes[0])
 
     assert lines[0] == "done: 1 stream part written"
-    assert any("00000.m2ts" in line for line in lines)
+    assert any("00000.MTS" in line for line in lines)
     assert any("split at 4096 MB" in line for line in lines)
 
 

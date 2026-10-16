@@ -30,9 +30,11 @@ log pane:
 4. **mux** — a `.meta` file is generated (`MUXOPT --avchd … --split-size=4096MB`)
    and `tsMuxeR <meta> <output>` writes the `BDMV/` + `CERTIFICATE/` tree,
    optionally split every N MB.
-5. **verify** — `index.bdmv`, `MovieObject.bdmv`, playlist(s) and stream(s) must
-   exist, every `.m2ts` must respect the split limit, and the streams inside must
-   match the plan (codec family, channel count).
+5. **verify** — tsMuxeR's tree is renamed to the AVCHD-on-FAT32 (8.3) names the
+   PS3 mounts from USB (`INDEX.BDM`, `MOVIEOBJ.BDM`, `*.MPL`, `*.CPI`, `*.MTS`),
+   all required files must exist, every stream part must respect the split
+   limit, and the streams inside must match the plan (codec family, channel
+   count).
 6. **cleanup** — the temp directory is removed on success and **kept on
    failure**, with an *Open temp dir* button and the exact command/exit code in
    the log.
@@ -137,16 +139,23 @@ decoder but no PGS encoder, so this is the approved fallback; see
 ## FAT32 and splitting
 
 The PS3 reads FAT32 and caps files at 4 GiB, so splitting is **on by default at
-4096 MB** (`tsMuxeR --split-size`; additional `.m2ts` parts are normal for the
-PS3). If the target filesystem is exFAT/NTFS/ext4 the app warns that splitting
-is unnecessary (V15) but never blocks — and if splitting is left on, the extra
-parts still play. The output directory gets the standard structure:
+4096 MB** (`tsMuxeR --split-size`; additional `00001.MTS` parts are normal for
+the PS3). If the target filesystem is exFAT/NTFS/ext4 the app warns that
+splitting is unnecessary (V15) but never blocks — and if splitting is left on,
+the extra parts still play.
+
+AVCHD on FAT32 uses legacy 8.3 file names, and a PS3 only mounts an AVCHD
+structure from USB when they are present — with the longer optical-media names
+tsMuxeR writes, the drive's files stay browsable and the stream parts still play
+as ordinary video, but no AVCHD entry appears in the XMB. After a successful
+mux, avchd-forge renames the tree (`BACKUP/` included, no file content touched)
+and verifies the result:
 
 ```
-<output>/BDMV/index.bdmv
-       /BDMV/MovieObject.bdmv
-       /BDMV/PLAYLIST/*.mpls
-       /BDMV/STREAM/*.m2ts
+<output>/BDMV/INDEX.BDM
+       /BDMV/MOVIEOBJ.BDM
+       /BDMV/PLAYLIST/*.MPL
+       /BDMV/STREAM/*.MTS
        /CERTIFICATE/…
 ```
 
@@ -170,8 +179,8 @@ watch to `AVCHD`:
 Renaming `AVCHD` to something else and the wanted folder to `AVCHD` is instant
 on FAT32 (only the directory entry changes); re-insert the drive and the PS3
 shows the new title. avchd-forge refuses to start when the chosen output folder
-already contains a `BDMV` tree (`BDMV/` or `AVCHD/BDMV/`) — tsMuxeR reuses fixed
-file names (`index.bdmv`, `00000.m2ts`, …) and a second run would overwrite the
+already contains a `BDMV` tree (`BDMV/` or `AVCHD/BDMV/`) — the mux reuses fixed
+file names (`INDEX.BDM`, `00000.MTS`, …) and a second run would overwrite the
 first movie. Multi-title discs (several playlists inside one BDMV, the
 multiAVCHD approach) are not supported.
 
@@ -180,6 +189,11 @@ multiAVCHD approach) are not supported.
 * **Start refuses to enable** — look at the status bar: tools unresolved, no
   source or an unusable one, no output folder, a read-only target, or an output
   folder that already holds an AVCHD tree (choose an empty folder).
+* **No AVCHD entry on the PS3** — the tree must sit in a folder called `AVCHD`
+  at the root of a FAT32 device and carry the 8.3 names avchd-forge writes
+  (`INDEX.BDM`, `*.MTS`, …). If the stream parts play from the file browser
+  (Triangle ▸ *Display All*) but no AVCHD icon appears, the folder name/case or
+  the file names are off.
 * **A run failed** — the temp directory is kept; *Open temp dir* shows the
   intermediate files, and the log has the exact argv, working directory, exit
   code and full output of the failing command.

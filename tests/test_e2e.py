@@ -12,8 +12,9 @@ that is allowed to start processes, and only under the ``e2e`` marker.
 What only these tests can prove, with the tools actually installed:
 
 * the generated meta file is accepted by tsMuxeR and really produces an
-  ``AVCHD`` tree — the unit tests feed canned tsMuxeR output to the verifier;
-* the composition check reads a real ``.m2ts`` and finds the video still
+  ``AVCHD`` tree — renamed to the FAT32 (PS3 USB) names the unit tests assert
+  against canned tsMuxeR output;
+* the composition check reads a real stream part and finds the video still
   H.264 at 1920x1080, both AC-3 tracks as AC-3 (6ch + 2ch), and the SubRip
   track converted to PGS;
 * ``--split-size`` really writes several parts, none above the limit.
@@ -170,9 +171,12 @@ def test_generated_media_remuxes_into_a_verified_avchd_tree(
     outcome = _run_pipeline(sample, tools, output_dir, temp_dir, split_size_mb=4096)
 
     bdmv = output_dir / "BDMV"
-    assert (bdmv / "index.bdmv").is_file()
-    assert (bdmv / "MovieObject.bdmv").is_file()
-    assert list((bdmv / "PLAYLIST").glob("*.mpls"))
+    # the shipped tree is the AVCHD-on-FAT32 flavour a PS3 mounts from USB
+    assert (bdmv / "INDEX.BDM").is_file()
+    assert (bdmv / "MOVIEOBJ.BDM").is_file()
+    assert list((bdmv / "PLAYLIST").glob("*.MPL"))
+    assert list((bdmv / "STREAM").glob("*.MTS"))
+    assert not (bdmv / "index.bdmv").exists()
     assert (output_dir / "CERTIFICATE").is_dir()
     assert len(outcome.stream_files) == 1, "4 GB of headroom must not split a 4 MB sample"
     assert outcome.verified_file == outcome.stream_files[0]

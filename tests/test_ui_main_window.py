@@ -112,7 +112,7 @@ def script_success(runner: FakeRunner) -> None:
             side_effect=lambda argv: fake_tree(Path(argv[-1])),
         )
     )
-    runner.add_stdout(json.dumps(output_payload(vstream(0), astream(1))), match=".m2ts")
+    runner.add_stdout(json.dumps(output_payload(vstream(0), astream(1))), match=".MTS")
 
 
 def prepared_window(tmp_path: Path) -> tuple[MainWindow, FakeRunner, Path]:

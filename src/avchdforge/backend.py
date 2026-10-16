@@ -3,8 +3,10 @@
 tsMuxeR 2.7.0 exits 0 while quietly producing wrong output — a phantom 0-channel
 AC-3 track, zero video frames, or a track that never made it into the file
 (``docs/CONTEXT.md`` §2.2) — so this module never trusts an exit code. After the
-mux the produced tree is checked, the first ``.m2ts`` is probed, and the streams
-found there are compared one by one with ``plan.tracks`` (decisions D4/D10).
+mux the tree is renamed to the AVCHD-on-FAT32 (8.3) names a PS3 needs to mount
+AVCHD from a USB drive (§2.11), the renamed tree is checked, the first stream
+part is probed, and the streams found there are compared one by one with
+``plan.tracks`` (decisions D4/D10/D22).
 
 Nothing here imports Qt and nothing spawns a process by itself: everything goes
 through the :class:`~avchdforge.process.Runner` and plain callbacks, which is what
@@ -13,6 +15,7 @@ keeps the whole flow unit-testable with a ``FakeRunner``.
 
 from __future__ import annotations
 
+import os
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -41,13 +44,29 @@ StageCallback = Callable[["JobStage"], None]
 #: The AVCHD tree tsMuxeR's ``--avchd`` mode writes (``docs/CONTEXT.md`` §2.1).
 BDMV_DIR: Final[str] = "BDMV"
 STREAM_DIR: Final[str] = "STREAM"
-#: Fixed files inside ``BDMV``. Note the exact spelling tsMuxeR uses.
-REQUIRED_BDMV_FILES: Final[tuple[str, ...]] = ("index.bdmv", "MovieObject.bdmv")
-#: Sub-directories that must contain at least one matching file.
-REQUIRED_BDMV_DIRS: Final[tuple[tuple[str, str], ...]] = (
-    ("PLAYLIST", "*.mpls"),
-    ("CLIPINF", "*.clpi"),
-    (STREAM_DIR, "*.m2ts"),
+BACKUP_DIR: Final[str] = "BACKUP"
+#: Every required ``BDMV`` file, with the names that satisfy it: tsMuxeR's
+#: optical-media name first, the AVCHD-on-FAT32 (PS3 USB) name second.
+REQUIRED_BDMV_FILES: Final[tuple[tuple[str, ...], ...]] = (
+    ("index.bdmv", "INDEX.BDM"),
+    ("MovieObject.bdmv", "MOVIEOBJ.BDM"),
+)
+#: Sub-directories that must contain at least one matching file (same rule).
+REQUIRED_BDMV_DIRS: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
+    ("PLAYLIST", ("*.mpls", "*.MPL")),
+    ("CLIPINF", ("*.clpi", "*.CPI")),
+    (STREAM_DIR, ("*.m2ts", "*.MTS")),
+)
+#: The renames that turn tsMuxeR's tree into the FAT32 flavour a PS3 mounts from
+#: USB (``docs/CONTEXT.md`` §2.11). Applied in ``BDMV`` and ``BDMV/BACKUP``.
+USB_FILE_RENAMES: Final[tuple[tuple[str, str], ...]] = (
+    ("index.bdmv", "INDEX.BDM"),
+    ("MovieObject.bdmv", "MOVIEOBJ.BDM"),
+)
+USB_SUFFIX_RENAMES: Final[tuple[tuple[str, str], ...]] = (
+    ("PLAYLIST/*.mpls", ".MPL"),
+    ("CLIPINF/*.clpi", ".CPI"),
+    ("STREAM/*.m2ts", ".MTS"),
 )
 #: Entries tsMuxeR may legitimately create next to each other.
 EXPECTED_TOP_LEVEL: Final[frozenset[str]] = frozenset({"BDMV", "CERTIFICATE"})
@@ -124,17 +143,28 @@ class JobOutcome:
 # --------------------------------------------------------------------------
 
 
+def find_streams(output_dir: Path | str) -> tuple[Path, ...]:
+    """Every produced stream part, whichever AVCHD flavour it is named in."""
+    stream_dir = Path(output_dir) / BDMV_DIR / STREAM_DIR
+    if not stream_dir.is_dir():
+        return ()
+    return tuple(sorted({*stream_dir.glob("*.m2ts"), *stream_dir.glob("*.MTS")}))
+
+
 def check_output_tree(
     output_dir: Path | str, *, split_size_mb: int | None = None
 ) -> VerificationReport:
     """Check the AVCHD file layout tsMuxeR is supposed to have written.
 
-    Pure filesystem inspection: no tool runs here. A missing ``BDMV`` short-circuits
-    the rest — there is nothing to look at, and the probe phase would only add
-    noise. ``split_size_mb`` compares every ``.m2ts`` against the size tsMuxeR was
-    asked to split at, plus :data:`SPLIT_OVERSHOOT_ALLOWANCE` for the keyframe
-    boundary; chunks over the bare target but within the allowance are reported in
-    ``details`` rather than as problems.
+    Pure filesystem inspection: no tool runs here. Every required file is
+    accepted under either AVCHD name — tsMuxeR's optical flavour (``index.bdmv``)
+    and the FAT32 flavour a PS3 mounts from USB (``INDEX.BDM``, §2.11). A missing
+    ``BDMV`` short-circuits the rest — there is nothing to look at, and the probe
+    phase would only add noise. ``split_size_mb`` compares every stream part
+    against the size tsMuxeR was asked to split at, plus
+    :data:`SPLIT_OVERSHOOT_ALLOWANCE` for the keyframe boundary; chunks over the
+    bare target but within the allowance are reported in ``details`` rather than
+    as problems.
     """
     root = Path(output_dir)
     bdmv = root / BDMV_DIR
@@ -147,23 +177,27 @@ def check_output_tree(
     warnings: list[str] = []
     details: list[str] = []
 
-    for name in REQUIRED_BDMV_FILES:
-        path = bdmv / name
-        if not path.is_file():
-            problems.append(f"{path} is missing")
-        elif path.stat().st_size == 0:
-            problems.append(f"{path} is empty")
+    for names in REQUIRED_BDMV_FILES:
+        found = next((bdmv / name for name in names if (bdmv / name).is_file()), None)
+        if found is None:
+            problems.append(f"{bdmv}: no {' or '.join(names)} file")
+        elif found.stat().st_size == 0:
+            problems.append(f"{found} is empty")
 
-    for name, pattern in REQUIRED_BDMV_DIRS:
+    for name, patterns in REQUIRED_BDMV_DIRS:
         directory = bdmv / name
-        entries = sorted(directory.glob(pattern)) if directory.is_dir() else []
+        entries = (
+            sorted({entry for pattern in patterns for entry in directory.glob(pattern)})
+            if directory.is_dir()
+            else []
+        )
         if not entries:
-            problems.append(f"{directory} contains no {pattern} file")
+            problems.append(f"{directory} contains no {' or '.join(patterns)} file")
         else:
             details.append(f"{name}: {', '.join(entry.name for entry in entries)}")
 
     target = split_size_mb * SPLIT_MB_BYTES if split_size_mb else None
-    for stream in sorted((bdmv / STREAM_DIR).glob("*.m2ts")):
+    for stream in find_streams(root):
         size = stream.stat().st_size
         if size == 0:
             problems.append(f"{stream.name} is empty")
@@ -241,14 +275,14 @@ def _count_problems(kind: str, wanted: list[PlannedTrack], actual: tuple) -> lis
 def verify_output(
     plan: JobPlan, runner: Runner, *, ffprobe: str = "ffprobe"
 ) -> VerificationReport:
-    """Check the tree, then probe the first ``.m2ts`` and compare the streams.
+    """Check the tree, then probe the first stream part and compare the streams.
 
     Only the first part is probed: with ``--split-size`` tsMuxeR repeats every
     stream in every part (verified), so one part is representative and a multi-GB
     disc does not need one ffprobe run per chunk.
     """
     report = check_output_tree(plan.output_dir, split_size_mb=plan.mux.options.split_size_mb)
-    streams = sorted((Path(plan.output_dir) / BDMV_DIR / STREAM_DIR).glob("*.m2ts"))
+    streams = find_streams(plan.output_dir)
     if not streams:
         return report
 
@@ -266,6 +300,43 @@ def verify_output(
 
     composition = check_stream_composition(plan, media)
     return report.merged(composition).merged(VerificationReport(verified_file=target))
+
+
+# --------------------------------------------------------------------------
+# PS3 USB naming
+# --------------------------------------------------------------------------
+
+
+def rename_tree_for_usb(output_dir: Path | str) -> tuple[str, ...]:
+    """Rename tsMuxeR's tree to the AVCHD-on-FAT32 names a PS3 mounts from USB.
+
+    tsMuxeR always writes the optical-media flavour — ``index.bdmv``,
+    ``MovieObject.bdmv``, ``00000.mpls``, ``00000.clpi``, ``00000.m2ts`` — but a
+    PS3 only mounts AVCHD from a USB drive when the legacy 8.3 names are present
+    (``docs/CONTEXT.md`` §2.11). With the optical names the drive's files are
+    still browsable and the raw stream parts play as ordinary video, but the
+    AVCHD disc never appears in the XMB.
+
+    Nothing inside any file is touched: playlists and clip info reference clips
+    as ``00000M2TS`` and players accept either extension. Returns one
+    ``"old -> new"`` string per rename; a second call is a no-op.
+    """
+    root = Path(output_dir)
+    renamed: list[str] = []
+    for base in (root / BDMV_DIR, root / BDMV_DIR / BACKUP_DIR):
+        if not base.is_dir():
+            continue
+        for source_name, target_name in USB_FILE_RENAMES:
+            source = base / source_name
+            if source.is_file():
+                _rename_path(source, base / target_name)
+                renamed.append(f"{source.name} -> {target_name}")
+        for pattern, suffix in USB_SUFFIX_RENAMES:
+            for source in sorted(base.glob(pattern)):
+                target = source.with_suffix(suffix)
+                _rename_path(source, target)
+                renamed.append(f"{source.name} -> {target.name}")
+    return tuple(renamed)
 
 
 # --------------------------------------------------------------------------
@@ -343,6 +414,15 @@ def execute_plan(
                              on_progress=lambda value: progress(value, len(plan.prep_steps)))
         progress(1.0, len(plan.prep_steps))
 
+        # Convert before verifying, so the checks inspect exactly what ships: a
+        # PS3 only mounts the FAT32 flavour from USB (docs/CONTEXT.md §2.11).
+        renamed = rename_tree_for_usb(plan.output_dir)
+        if renamed and on_line is not None:
+            on_line(
+                f"[avchd-forge] renamed {len(renamed)} files to the "
+                f"AVCHD-on-FAT32 (PS3 USB) names\n"
+            )
+
         check_cancel("verifying")
         announce("verify", "verifying the AVCHD structure")
         if on_progress is not None:
@@ -358,10 +438,9 @@ def execute_plan(
         if on_progress is not None:
             on_progress(1.0)
 
-        stream_dir = Path(plan.output_dir) / BDMV_DIR / STREAM_DIR
         return JobOutcome(
             plan=plan,
-            stream_files=tuple(sorted(stream_dir.glob("*.m2ts"))),
+            stream_files=find_streams(plan.output_dir),
             mux_output=mux_result.output,
             verified_file=report.verified_file,
             warnings=report.warnings,
@@ -503,6 +582,26 @@ def _tool_name(argv0: str) -> str:
     return Path(argv0).name or argv0
 
 
+def _rename_path(source: Path, target: Path) -> None:
+    """Rename one file, handling the case-only rename a FAT mount needs.
+
+    On a case-insensitive filesystem the target ``exists`` as the same file;
+    ``os.replace`` is the portable way to change its case (Windows ``os.rename``
+    refuses). A genuinely different file at the target means the tree is not what
+    tsMuxeR just wrote, so fail loudly instead of clobbering it.
+    """
+    if target.exists() and not _same_file(source, target):
+        raise OSError(f"refusing to overwrite {target} while converting the tree")
+    os.replace(source, target)
+
+
+def _same_file(left: Path, right: Path) -> bool:
+    try:
+        return left.samefile(right)
+    except OSError:  # pragma: no cover - one side vanished mid-check
+        return False
+
+
 def _video_problem(plan: JobPlan, track: PlannedTrack, stream: VideoTrack) -> str | None:
     family = codec_family(stream.codec)
     if family != track.family:
@@ -564,6 +663,7 @@ def _describe_actual(streams: tuple) -> str:
 
 
 __all__ = [
+    "BACKUP_DIR",
     "BDMV_DIR",
     "EXPECTED_TOP_LEVEL",
     "FAT32_MAX_BYTES",
@@ -572,6 +672,8 @@ __all__ = [
     "SPLIT_MB_BYTES",
     "SPLIT_OVERSHOOT_ALLOWANCE",
     "STREAM_DIR",
+    "USB_FILE_RENAMES",
+    "USB_SUFFIX_RENAMES",
     "JobOutcome",
     "JobStage",
     "StageCallback",
@@ -580,6 +682,8 @@ __all__ = [
     "check_output_tree",
     "check_stream_composition",
     "execute_plan",
+    "find_streams",
+    "rename_tree_for_usb",
     "run_mux",
     "run_prep_step",
     "verify_output",

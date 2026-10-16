@@ -129,10 +129,12 @@ FAT32_FILESYSTEMS: Final[frozenset[str]] = frozenset({"vfat", "msdos", "fat", "f
 #: Filesystems that are fine but bigger-file-capable, so splitting is optional.
 LARGE_FILE_FILESYSTEMS: Final[frozenset[str]] = frozenset({"exfat", "ntfs", "ext4", "ext3"})
 
-#: Relative paths that must exist inside a successful AVCHD output.
+#: Relative paths that must exist inside a successful AVCHD output. The FAT32
+#: (PS3 USB) flavour is what avchd-forge ships; tsMuxeR writes the optical names
+#: first and :func:`avchdforge.backend.rename_tree_for_usb` renames them.
 AVCHD_REQUIRED_PATHS: Final[tuple[str, ...]] = (
-    "BDMV/index.bdmv",
-    "BDMV/MovieObject.bdmv",
+    "BDMV/INDEX.BDM",
+    "BDMV/MOVIEOBJ.BDM",
 )
 
 # --------------------------------------------------------------------------

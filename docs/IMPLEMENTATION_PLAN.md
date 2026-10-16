@@ -156,8 +156,10 @@ ultimately `finished(JobResult)`:
 3. `prep.*` → audio cores and subtitle conversions, sequentially, temp dir
    `mkdtemp(prefix="avchd-forge-", dir=settings.temp_dir)`.
 4. `mux` → write `<tmp>/job.meta`, run `tsMuxeR <meta> <output_dir>`.
-5. `verify` → `BDMV/index.bdmv`, `BDMV/MOVIEOBJ.BDM`, at least one `BDMV/PLAYLIST/*.mpls`
-   and `BDMV/STREAM/*.m2ts`; every `.m2ts` ≤ split limit; warn on stray files.
+5. `verify` → rename the tree to the AVCHD-on-FAT32 names the PS3 mounts from USB
+   (`INDEX.BDM`, `MOVIEOBJ.BDM`, `*.MPL`, `*.CPI`, `*.MTS`; D22/§2.11 of
+   `docs/CONTEXT.md`), then check all of them, at least one `BDMV/PLAYLIST/*.MPL`
+   and `BDMV/STREAM/*.MTS`; every part ≤ split limit; warn on stray files.
 6. `cleanup` → temp dir removed on success (kept on failure, path surfaced in UI and
    in the log with a "Open temp dir" button).
 
@@ -227,6 +229,7 @@ names, so a second run into the same folder would overwrite the first title.
 16. `feat(ui): preferences dialog and startup tool gate`
 17. `docs: README, packaging metadata, requirements`
 18. `test(e2e): real tsMuxeR + ffmpeg smoke run on generated media`
+19. `fix(backend): ship the AVCHD-on-FAT32 (8.3) names the PS3 mounts from USB`
 
 ## 3. Verification strategy
 
@@ -236,9 +239,9 @@ names, so a second run into the same folder would overwrite the first title.
   `lsblk` JSON. All external effects go through `FakeRunner`.
 * **Integration (marked `e2e`, skipped by default)** — generate a 12-second
   1080p H.264 AC-3 + SRT sample with ffmpeg, run the real pipeline with the real
-  tsMuxeR binary, then assert the BDMV tree, ffprobe the produced `.m2ts`
-  (codec must still be `h264`, audio `ac3`) and check splitting with a small
-  `--split-size`.
+  tsMuxeR binary, then assert the renamed (`INDEX.BDM`/`*.MTS`, D22) BDMV tree,
+  ffprobe the produced stream part (codec must still be `h264`, audio `ac3`) and
+  check splitting with a small `--split-size`.
 * **Manual smoke** — launch the GUI offscreen (`QT_QPA_PLATFORM=offscreen`) in CI
   style, and interactively on a desktop when available.
 
