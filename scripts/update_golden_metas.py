@@ -24,9 +24,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from avchdforge.meta import render_meta  # noqa: E402
 from meta_jobs import JOBS  # noqa: E402
 from plan_jobs import JOBS as PLAN_JOBS  # noqa: E402
+
+from avchdforge.meta import render_meta  # noqa: E402
 
 TARGET = ROOT / "tests" / "data" / "meta"
 
