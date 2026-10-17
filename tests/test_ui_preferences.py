@@ -114,7 +114,6 @@ def test_the_dialog_starts_from_the_stored_preferences(tmp_path: Path) -> None:
     settings.set_tool_path(TSMUXER, "/opt/tsMuxeR/tsMuxeR")
     settings.set_split_enabled(False)
     settings.set_split_size_mb(2048)
-    settings.set_allow_nonstandard_resolution(True)
     settings.set_subtitle_style(
         SubtitleStyle(
             font_name="Noto Sans", font_size=70, font_color="0xEBFFFFFF", bottom_offset=30
@@ -133,7 +132,6 @@ def test_the_dialog_starts_from_the_stored_preferences(tmp_path: Path) -> None:
     assert not dialog.split_check.isChecked()
     assert dialog.split_spin.value() == 2048
     assert not dialog.split_spin.isEnabled()  # splitting is off
-    assert dialog.allow_nonstandard_check.isChecked()
     assert dialog.font_name_edit.text() == "Noto Sans"
     assert dialog.font_size_spin.value() == 70
     assert dialog.font_color_edit.text() == "0xEBFFFFFF"
@@ -152,7 +150,6 @@ def test_a_fresh_dialog_shows_the_defaults(tmp_path: Path) -> None:
     assert dialog.split_check.isChecked()
     assert dialog.split_spin.value() == DEFAULT_SPLIT_SIZE_MB
     assert dialog.split_spin.isEnabled()
-    assert not dialog.allow_nonstandard_check.isChecked()
     assert dialog.font_name_edit.text() == DEFAULT_FONT_NAME
     assert dialog.font_size_spin.value() == DEFAULT_FONT_SIZE
     assert dialog.font_color_edit.text() == DEFAULT_FONT_COLOR
@@ -169,7 +166,6 @@ def test_apply_writes_every_widget_back_to_the_preferences(tmp_path: Path) -> No
         dialog.tool_edits[name].setText(f"/opt/{name}")
     dialog.split_check.setChecked(True)
     dialog.split_spin.setValue(2000)
-    dialog.allow_nonstandard_check.setChecked(True)
     dialog.font_name_edit.setText("  Noto Sans  ")
     dialog.font_size_spin.setValue(48)
     dialog.font_color_edit.setText("0xEBFFFFFF")
@@ -187,7 +183,6 @@ def test_apply_writes_every_widget_back_to_the_preferences(tmp_path: Path) -> No
     assert settings.tool_path(FFPROBE) == Path("/opt/ffprobe")
     assert settings.split_enabled is True
     assert settings.split_size_mb() == 2000
-    assert settings.allow_nonstandard_resolution is True
     assert settings.subtitle_style() == SubtitleStyle(
         font_name="Noto Sans", font_size=48, font_color="0xEBFFFFFF", bottom_offset=12
     )

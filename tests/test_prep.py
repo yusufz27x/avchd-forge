@@ -14,16 +14,19 @@ from avchdforge.prep import (
     build_audio_core_argv,
     build_subtitle_to_srt_argv,
     build_subtitle_to_sup_argv,
+    build_window_restore_argv,
     check_prep_output,
     ffmpeg_preamble,
     plan_prep_steps,
     prep_step_to_meta_track,
     temp_name,
+    window_missing_bsfs,
 )
 from avchdforge.probe import parse_ffprobe_json
 from avchdforge.selection import TrackSelection
+from avchdforge.sps import WindowRestore
 
-from .conftest import astream, build_media, load_json, sstream, vstream
+from .conftest import DATA_DIR, astream, build_media, load_json, sstream, vstream
 
 CAPS_PLAIN = FfmpegCapabilities(
     subtitle_encoders=frozenset({"srt", "ass"}),
@@ -36,6 +39,23 @@ CAPS_WITH_PGS = FfmpegCapabilities(
     bitstream_filters=frozenset({"dca_core", "eac3_core"}),
     muxers=frozenset({"matroska", "sup", "srt"}),
 )
+#: A build that advertises the SPS-rewriting bitstream filter (FFmpeg 4.1+).
+CAPS_WINDOW = FfmpegCapabilities(
+    subtitle_encoders=frozenset({"srt", "ass"}),
+    bitstream_filters=frozenset({"dca_core", "eac3_core", "h264_metadata", "dump_extra"}),
+    muxers=frozenset({"matroska", "mpegts", "sup", "srt", "dts", "ac3"}),
+)
+#: The same build without ``dump_extra``: the repair cannot work, because the
+#: rewritten SPS/PPS would never reach the elementary stream.
+CAPS_WINDOW_NO_DUMP = FfmpegCapabilities(
+    subtitle_encoders=frozenset({"srt", "ass"}),
+    bitstream_filters=frozenset({"dca_core", "eac3_core", "h264_metadata"}),
+    muxers=frozenset({"matroska", "mpegts", "sup", "srt", "dts", "ac3"}),
+)
+
+
+def sps_dump(name: str) -> str:
+    return (DATA_DIR / "sps" / name).read_text(encoding="utf-8")
 
 
 @pytest.fixture()
@@ -143,6 +163,41 @@ def test_subtitle_sup_argv_uses_the_pgs_encoder():
 
     assert argv[argv.index("-c:s") + 1] == "pgssub"
     assert argv[-3:] == ["-f", "sup", "out.sup"]
+
+
+def test_window_restore_argv_copies_the_stream_through_the_filter():
+    restore = WindowRestore(target_width=1920, target_height=1080, crop_bottom=8)
+    argv = build_window_restore_argv(
+        "ffmpeg", Path("/in/movie.mkv"), 0, restore=restore, output="/tmp/v.264"
+    )
+
+    assert argv == [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostdin",
+        "-v",
+        "error",
+        "-y",
+        "-progress",
+        "pipe:1",
+        "-nostats",
+        "-i",
+        "/in/movie.mkv",
+        "-map",
+        "0:0",
+        "-c:v",
+        "copy",
+        "-bsf:v",
+        "h264_metadata=crop_left=0:crop_right=0:crop_top=0:crop_bottom=8,dump_extra",
+        "-f",
+        "h264",
+        "/tmp/v.264",
+    ]
+    assert argv[argv.index("-c:v") + 1] == "copy", "the video is never re-encoded"
+    assert "dump_extra" in argv[argv.index("-bsf:v") + 1], (
+        "without it the repaired stream carries no parameter sets"
+    )
+    assert "-vf" not in argv and "-filter:v" not in argv
 
 
 # --------------------------------------------------------------------------
@@ -288,6 +343,132 @@ def test_steps_are_ordered_audio_then_subtitles(hd_media, tmp_path):
 
     assert [step.kind for step in steps] == ["audio-core", "subtitle-convert", "subtitle-convert"]
     assert [step.source_index for step in steps] == [1, 3, 4]
+
+
+# --------------------------------------------------------------------------
+# the SPS window repair
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def window_media():
+    """1088-coded / 1036-shown video plus AC-3 and SubRip, from a real dump."""
+    return build_media(
+        [
+            vstream(width=1920, height=1036, extradata=sps_dump("avcc_window_crop_1036.txt")),
+            astream(),
+            sstream(2, "subrip"),
+        ]
+    )
+
+
+def test_window_crop_produces_a_video_step_before_everything_else(window_media, tmp_path):
+    steps = plan_prep_steps(
+        window_media,
+        TrackSelection(audio=(1,), subtitles=(2,)),
+        temp_dir=tmp_path,
+        capabilities=CAPS_WINDOW,
+    )
+
+    assert [step.kind for step in steps] == ["video-window", "subtitle-convert"]
+    step = steps[0]
+    assert step.source_index == 0
+    assert step.output == tmp_path / "video-0-window.264"
+    assert step.expected_codec == "h264"
+    assert step.expected_width == 1920
+    assert step.expected_height == 1080
+    assert step.mux_codec_tag == "V_MPEG4/ISO/AVC"
+    assert "1920x1080" in step.label
+    assert "crop_bottom=8" in step.argv[step.argv.index("-bsf:v") + 1]
+
+
+def test_window_crop_needs_no_step_when_the_filter_is_missing(window_media, tmp_path):
+    steps = plan_prep_steps(
+        window_media,
+        TrackSelection(audio=(1,)),
+        temp_dir=tmp_path,
+        capabilities=CAPS_PLAIN,
+    )
+
+    assert steps == ()
+
+
+def test_window_crop_needs_the_extradata_injection_too(window_media, tmp_path):
+    """``h264_metadata`` alone emits a stream with no SPS/PPS in it."""
+    steps = plan_prep_steps(
+        window_media,
+        TrackSelection(audio=(1,)),
+        temp_dir=tmp_path,
+        capabilities=CAPS_WINDOW_NO_DUMP,
+    )
+
+    assert steps == ()
+    assert window_missing_bsfs(CAPS_WINDOW_NO_DUMP) == ("dump_extra",)
+    assert window_missing_bsfs(CAPS_WINDOW) == ()
+
+
+def test_check_prep_output_accepts_the_restored_size(window_media, tmp_path):
+    step = plan_prep_steps(
+        window_media,
+        TrackSelection(audio=(1,)),
+        temp_dir=tmp_path,
+        capabilities=CAPS_WINDOW,
+    )[0]
+
+    assert check_prep_output(step, build_media([vstream(width=1920, height=1080)])) is None
+
+
+def test_check_prep_output_rejects_an_unrestored_window(window_media, tmp_path):
+    step = plan_prep_steps(
+        window_media,
+        TrackSelection(audio=(1,)),
+        temp_dir=tmp_path,
+        capabilities=CAPS_WINDOW,
+    )[0]
+
+    problem = check_prep_output(step, build_media([vstream(width=1920, height=1036)]))
+
+    assert problem is not None
+    assert "displays 1920x1036, expected 1920x1080" in problem
+
+
+def test_check_prep_output_rejects_a_video_step_without_video(window_media, tmp_path):
+    step = plan_prep_steps(
+        window_media,
+        TrackSelection(audio=(1,)),
+        temp_dir=tmp_path,
+        capabilities=CAPS_WINDOW,
+    )[0]
+
+    assert "no video stream" in check_prep_output(step, build_media([astream()]))
+    assert "expected h264" in check_prep_output(
+        step, build_media([vstream(codec="hevc", width=1920, height=1080)])
+    )
+
+
+def test_video_context_uses_the_size_after_the_repair(window_media, ac3_media):
+    repaired = VideoContext.from_media(window_media)
+    assert (repaired.width, repaired.height) == (1920, 1080)
+
+    untouched = VideoContext.from_media(ac3_media)
+    assert (untouched.width, untouched.height) == (1920, 1080)
+
+
+def test_video_step_becomes_a_track_zero_meta_line(window_media, tmp_path):
+    step = plan_prep_steps(
+        window_media,
+        TrackSelection(audio=(1,)),
+        temp_dir=tmp_path,
+        capabilities=CAPS_WINDOW,
+    )[0]
+
+    track = prep_step_to_meta_track(step, video=VideoContext.from_media(window_media))
+
+    assert track.codec_tag == "V_MPEG4/ISO/AVC"
+    assert track.track_id == 0
+    assert track.path == step.output
+    assert track.fps == pytest.approx(23.976, abs=0.001)
+    assert track.language == "und"
 
 
 # --------------------------------------------------------------------------

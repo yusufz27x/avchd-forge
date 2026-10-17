@@ -1,8 +1,11 @@
-"""Preparation steps: audio-core extraction and subtitle conversion.
+"""Preparation steps: window restore, audio-core extraction, subtitle conversion.
 
 Everything here is argv construction — pure functions that the tests can assert
 against without running anything. The rules that matter:
 
+* the video conformance-window repair is a *bitstream filter over a stream copy*
+  (``-c:v copy -bsf:v h264_metadata=…``): the coded pictures are untouched, only
+  the SPS is rewritten so the decoder shows rows that were always there;
 * audio cores are only ever *copied* through a bitstream filter
   (``-c:a copy -bsf:a dca_core`` / ``eac3_core``) or demuxed (``-c:a copy``);
   there is no encoder flag anywhere in this module;
@@ -30,8 +33,27 @@ from .constants import (
 from .meta import MetaTrack
 from .probe import MediaInfo
 from .selection import TrackSelection
+from .sps import WindowRestore
 
-StepKind = Literal["audio-core", "subtitle-convert", "subtitle-encode"]
+StepKind = Literal["video-window", "audio-core", "subtitle-convert", "subtitle-encode"]
+
+#: Bitstream filters the window repair needs, in chain order. ``h264_metadata``
+#: rewrites the SPS conformance window (FFmpeg 4.1+); ``dump_extra`` then puts
+#: the rewritten parameter sets in-band. That second one is not optional: a
+#: Matroska/MP4 source keeps its SPS/PPS in ``avcC`` only, and the filter does
+#: not copy extradata to its output — without ``dump_extra`` the repaired file
+#: is an elementary stream with no parameter sets, which neither ffprobe nor
+#: tsMuxeR can read (see ``docs/CONTEXT.md`` §2.12).
+WINDOW_BSFS: tuple[str, str] = ("h264_metadata", "dump_extra")
+
+#: The SPS-rewriting filter on its own; also the name the error messages use.
+WINDOW_BSF = WINDOW_BSFS[0]
+
+
+def window_missing_bsfs(capabilities: FfmpegCapabilities) -> tuple[str, ...]:
+    """The window-repair filters this ffmpeg build does not advertise."""
+    return tuple(name for name in WINDOW_BSFS if not capabilities.has_bsf(name))
+
 
 #: Progress lines are requested on stdout so the log pane stays readable.
 FFMPEG_PROGRESS_ARGS: tuple[str, ...] = ("-progress", "pipe:1", "-nostats")
@@ -61,6 +83,9 @@ class PrepStep:
     language: str | None = None
     #: Set for subtitle steps that feed tsMuxeR's SRT renderer.
     text_subtitle: bool = False
+    #: Video steps only: the size the produced file must display.
+    expected_width: int | None = None
+    expected_height: int | None = None
 
     @property
     def selected_stream(self) -> int:
@@ -159,6 +184,44 @@ def build_subtitle_to_sup_argv(
     ]
 
 
+def build_window_restore_argv(
+    ffmpeg: str | Path,
+    source: Path | str,
+    stream_index: int,
+    *,
+    restore: WindowRestore,
+    output: Path | str,
+) -> list[str]:
+    """argv that open the SPS conformance window and copy the coded pictures.
+
+    ``h264_metadata`` rewrites the SPS the stream already carries; with
+    ``-c:v copy`` every coded picture passes through untouched. The option
+    values replace the window rather than edit it (FFmpeg's default ``-1``
+    means "leave alone"), which is why left/right/top are set to zero
+    explicitly: the repaired frame must show the whole coded width and start at
+    coded row 0. ``dump_extra`` follows so the rewritten SPS/PPS travel inside
+    the elementary stream: the filter emits a headerless stream, and a probe
+    (or tsMuxeR) reads the display size from those parameter sets.
+    """
+    return [
+        *ffmpeg_preamble(ffmpeg),
+        "-i",
+        str(source),
+        "-map",
+        f"0:{stream_index}",
+        "-c:v",
+        "copy",
+        "-bsf:v",
+        (
+            f"{WINDOW_BSF}=crop_left=0:crop_right=0:crop_top=0"
+            f":crop_bottom={restore.crop_bottom},{WINDOW_BSFS[1]}"
+        ),
+        "-f",
+        "h264",
+        str(output),
+    ]
+
+
 def temp_name(kind: str, index: int, suffix: str, *, hint: str = "") -> str:
     """Deterministic temp file name: ``audio-1-dtscore.dts``, ``sub-4.srt``."""
     cleaned = _UNSAFE_NAME.sub("-", hint).strip("-")
@@ -175,10 +238,41 @@ def plan_prep_steps(
     capabilities: FfmpegCapabilities | None = None,
     decisions: dict[int, AudioDecision] | None = None,
 ) -> tuple[PrepStep, ...]:
-    """The ffmpeg work a mux needs, in order (audio first, then subtitles)."""
+    """The ffmpeg work a mux needs, in order (video, audio, then subtitles)."""
     caps = capabilities or FfmpegCapabilities()
     decisions = decisions if decisions is not None else decide_audio_all(media)
     steps: list[PrepStep] = []
+
+    video = media.video
+    if video is not None:
+        restore = video.restore_window()
+        if restore is not None and not window_missing_bsfs(caps):
+            output = temp_dir / temp_name("video", video.index, ".264", hint="window")
+            steps.append(
+                PrepStep(
+                    kind="video-window",
+                    source_index=video.index,
+                    label=(
+                        f"restore the H.264 crop window to "
+                        f"{restore.target_width}x{restore.target_height} (stream copy)"
+                    ),
+                    argv=tuple(
+                        build_window_restore_argv(
+                            ffmpeg,
+                            media.path,
+                            video.index,
+                            restore=restore,
+                            output=output,
+                        )
+                    ),
+                    output=output,
+                    expected_codec="h264",
+                    mux_codec_tag="V_MPEG4/ISO/AVC",
+                    language=video.language,
+                    expected_width=restore.target_width,
+                    expected_height=restore.target_height,
+                )
+            )
 
     for index in selection.sorted_audio():
         track = media.audio_track(index)
@@ -272,7 +366,8 @@ class VideoContext:
         video = media.video
         if video is None:
             return cls()
-        return cls(fps=video.fps, width=video.width, height=video.height)
+        width, height = video.output_resolution
+        return cls(fps=video.fps, width=width, height=height)
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,6 +395,8 @@ def prep_step_to_meta_track(
     video = video or VideoContext()
     style = style or SubtitleStyle()
 
+    if step.kind == "video-window":
+        return MetaTrack.video(step.output, 0, language=step.language, fps=video.fps)
     if step.kind == "audio-core":
         return MetaTrack.audio(
             step.mux_codec_tag,
@@ -348,6 +445,23 @@ def check_prep_output(step: PrepStep, media: MediaInfo) -> str | None:
     if not media.videos and not media.audio and not media.subtitles:
         return f"{step.output.name} contains no usable streams"
 
+    if step.kind == "video-window":
+        if not media.videos:
+            return f"{step.output.name} contains no video stream"
+        video = media.videos[0]
+        if video.codec != step.expected_codec:
+            return f"{step.output.name} contains {video.codec}, expected {step.expected_codec}"
+        if step.expected_width and step.expected_height and (
+            video.width,
+            video.height,
+        ) != (step.expected_width, step.expected_height):
+            return (
+                f"{step.output.name} displays {video.width}x{video.height}, expected "
+                f"{step.expected_width}x{step.expected_height}: the crop window was not "
+                "restored"
+            )
+        return None
+
     if step.kind == "audio-core":
         if not media.audio:
             return f"{step.output.name} contains no audio stream"
@@ -374,15 +488,19 @@ def check_prep_output(step: PrepStep, media: MediaInfo) -> str | None:
 
 __all__ = [
     "FFMPEG_PROGRESS_ARGS",
+    "WINDOW_BSF",
+    "WINDOW_BSFS",
     "PrepStep",
     "SubtitleStyle",
     "VideoContext",
     "build_audio_core_argv",
     "build_subtitle_to_srt_argv",
     "build_subtitle_to_sup_argv",
+    "build_window_restore_argv",
     "check_prep_output",
     "ffmpeg_preamble",
     "plan_prep_steps",
     "prep_step_to_meta_track",
     "temp_name",
+    "window_missing_bsfs",
 ]

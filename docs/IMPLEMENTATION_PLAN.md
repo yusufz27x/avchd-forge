@@ -32,7 +32,7 @@ place that knows both Qt and the core pipeline.
 
 | Type | Fields (essential) |
 | --- | --- |
-| `VideoTrack` | `index`, `codec`, `profile`, `level: float \| None`, `width`, `height`, `fps`, `pix_fmt`, `bitrate`, `field_order`, `duration` |
+| `VideoTrack` | `index`, `codec`, `profile`, `level: float \| None`, `width`, `height`, `fps`, `pix_fmt`, `bitrate`, `field_order`, `duration`, `sps: SpsGeometry \| None` (+ `coded_resolution`, `restore_window()`, `output_resolution`) |
 | `AudioTrack` | `index`, `codec` (`ac3`/`eac3`/`dts`/`truehd`/`aac`/`pcm_*`), `codec_long` (e.g. *DTS-HD MA*), `channels`, `channel_layout`, `sample_rate`, `bitrate`, `language`, `title`, `is_default`, `is_forced`, `has_embedded_core: bool \| None` |
 | `SubtitleTrack` | `index`, `codec` (`hdmv_pgs_subtitle`/`subrip`/`ass`/…), `language`, `title`, `is_default`, `is_forced` |
 | `MediaInfo` | `path`, `format_name`, `duration`, `size_bytes`, `video`, `audio[]`, `subtitles[]`, `raw` (kept for the log pane) |
@@ -40,6 +40,11 @@ place that knows both Qt and the core pipeline.
 Parsing is split in two: `build_ffprobe_argv(tool, path)` and
 `parse_ffprobe_json(dict) -> MediaInfo`. `probe(path, runner)` just glues them.
 Golden fixtures live in `tests/data/ffprobe/`.
+
+The argv asks for `-show_data` so the video stream's `extradata` hexdump reaches
+`sps.parse_sps` (`avchdforge.sps`, pure): coded size + conformance window, then
+`window_restore()` decides whether a non-1080 display can be repaired losslessly
+(§2.12).
 
 ### Validation (`validate.py`)
 
@@ -52,7 +57,7 @@ Golden fixtures live in `tests/data/ffprobe/`.
 | V1 | input extension ∈ {`.mkv`, `.ts`, `.m2ts`, `.mpg`} | error |
 | V2 | exactly one video stream | error |
 | V3 | video codec is `h264`/AVC (HEVC, MPEG-2, VC-1 … rejected) | error |
-| V4 | resolution is exactly 1920×1080 or 1280×720 | error (warning with the Preferences opt-in) |
+| V4 | resolution is exactly 1920×1080 or 1280×720; a window crop whose coded rows can be restored is a warning (the plan repairs it, D25), a hard crop or an unreadable SPS is an error | warning / error |
 | V5 | H.264 level ≤ 4.1 (level 4.2/5.x allowed but flagged) | warning |
 | V6 | 1080 line frame rate ≤ 30 (29.97) and 720 line frame rate ≤ 60 (59.94) | warning |
 | V7 | `field_order` interleaved/`tt`/`bb` (interlaced input) | warning |
@@ -104,6 +109,25 @@ S_HDMV/PGS, "/tmp/avchd-forge-xyz/subs/sub-0.sup", track=0, lang=eng
 `JobPlan` bundles: `source`, `output_dir`, `temp_dir`, `media`, `selection`,
 `steps` (ordered `PrepStep`s + `MuxStep`), `meta` text, `warnings`.
 
+### Video window repair (`prep.py`, `sps.py`)
+
+Only for a display size that is not 1920×1080/1280×720 *and* whose coded frame
+still contains the missing rows (`VideoTrack.restore_window()`, §2.12):
+
+```
+ffmpeg -i src -map 0:<video-index> -c:v copy \
+  -bsf:v h264_metadata=crop_left=0:crop_right=0:crop_top=0:crop_bottom=<slack>,dump_extra \
+  -f h264 out.264
+```
+
+The step is planned only when the ffmpeg build advertises **both** filters
+(`prep.WINDOW_BSFS`); `dump_extra` is what puts the rewritten SPS/PPS into the
+elementary stream, because `h264_metadata` alone emits a headerless one. The
+produced file must probe as `h264` at the restored size (`check_prep_output`),
+and tsMuxeR muxes it as `track=0` like an extracted audio core (D9). If the
+restore is needed but the filters are missing, `build_plan` raises `PlanError`
+instead of quietly muxing a broken stream.
+
 ### Audio matrix (`prep.py`)
 
 | Source codec | Action | Command fragment |
@@ -153,7 +177,8 @@ ultimately `finished(JobResult)`:
 
 1. `probe` → build `MediaInfo` (log the raw JSON).
 2. `revalidate` → abort on error.
-3. `prep.*` → audio cores and subtitle conversions, sequentially, temp dir
+3. `prep.*` → the video window repair, then audio cores and subtitle
+   conversions, sequentially, temp dir
    `mkdtemp(prefix="avchd-forge-", dir=settings.temp_dir)`.
 4. `mux` → the destination is `<output_dir>/AVCHD` unless the chosen folder is
    already named `AVCHD` (`plan.avchd_destination`, D23); create it, write

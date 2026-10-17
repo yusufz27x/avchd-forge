@@ -214,20 +214,6 @@ class PreferencesDialog(QtWidgets.QDialog):
         layout.addWidget(self.split_check)
         layout.addLayout(row)
 
-        layout.addWidget(QtWidgets.QLabel("Compatibility", tab))
-        self.allow_nonstandard_check = QtWidgets.QCheckBox(
-            "Allow non-standard video resolutions (experimental)", tab
-        )
-        layout.addWidget(self.allow_nonstandard_check)
-        layout.addWidget(
-            QtWidgets.QLabel(
-                "AVCHD wants exactly 1920x1080 or 1280x720. With this on, cropped "
-                "sources (1920x1036, 1920x800, …) are muxed anyway with a warning; "
-                "the PS3 usually plays them, but playback is not guaranteed.",
-                tab,
-            )
-        )
-
         layout.addWidget(QtWidgets.QLabel("tsMuxeR subtitle renderer (SRT/ASS → PGS)", tab))
         form = QtWidgets.QFormLayout()
         self.font_name_edit = QtWidgets.QLineEdit(tab)
@@ -285,9 +271,6 @@ class PreferencesDialog(QtWidgets.QDialog):
         self.split_check.setChecked(self._settings.split_enabled)
         self.split_spin.setValue(self._settings.stored_split_size_mb())
         self._update_split_enabled()
-        self.allow_nonstandard_check.setChecked(
-            self._settings.allow_nonstandard_resolution
-        )
 
         style = self._settings.subtitle_style()
         self.font_name_edit.setText(style.font_name or "")
@@ -311,9 +294,6 @@ class PreferencesDialog(QtWidgets.QDialog):
 
         self._settings.set_split_enabled(self.split_check.isChecked())
         self._settings.set_split_size_mb(self.split_spin.value())
-        self._settings.set_allow_nonstandard_resolution(
-            self.allow_nonstandard_check.isChecked()
-        )
         self._settings.set_subtitle_style(
             SubtitleStyle(
                 font_name=self.font_name_edit.text().strip() or None,

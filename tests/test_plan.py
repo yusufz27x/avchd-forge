@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from avchdforge.capabilities import FfmpegCapabilities
-from avchdforge.errors import TrackMappingError, ValidationFailed
+from avchdforge.errors import PlanError, TrackMappingError, ValidationFailed
 from avchdforge.plan import (
     META_FILE_NAME,
     JobPlan,
@@ -81,6 +81,12 @@ def test_passthrough_plan_meta_matches_the_golden_file(golden):
     from .plan_jobs import plan_basic
 
     assert plan_basic().meta_text == golden("plan_basic.meta")
+
+
+def test_window_restore_plan_meta_matches_the_golden_file(golden):
+    from .plan_jobs import plan_window_restore
+
+    assert plan_window_restore().meta_text == golden("plan_window_restore.meta")
 
 
 def test_plan_is_deterministic():
@@ -186,6 +192,67 @@ def test_video_line_carries_the_stream_fixes_and_the_detected_id():
 def test_the_plan_emits_exactly_one_video_line():
     plan = build(ac3_media(), TrackSelection(audio=(1,)), AC3_DETECTION)
     assert plan.meta_text.count("V_MPEG4/ISO/AVC") == 1
+
+
+# --------------------------------------------------------------------------
+# window-cropped sources
+# --------------------------------------------------------------------------
+
+
+def test_a_window_cropped_video_is_muxed_from_the_restored_stream():
+    from .plan_jobs import WINDOW_CAPABILITIES, WINDOW_DETECTION, window_media
+
+    plan = build(
+        window_media(),
+        TrackSelection(audio=(1,), subtitles=(2,)),
+        WINDOW_DETECTION,
+        options=PlanOptions().with_capabilities(WINDOW_CAPABILITIES),
+    )
+
+    video = plan.video
+    assert video is not None
+    assert video.prepared is True
+    assert video.track_id == 0, "raw elementary streams are muxed as track=0"
+    assert video.source == TEMP / "video-0-window.264"
+
+    assert [step.kind for step in plan.prep_steps] == ["video-window", "subtitle-convert"]
+    assert plan.meta_text.count(str(video.source)) == 1
+    assert f"V_MPEG4/ISO/AVC, {video.source}" in plan.meta_text
+
+
+def test_the_subtitle_renderer_gets_the_restored_video_size():
+    from .plan_jobs import WINDOW_CAPABILITIES, WINDOW_DETECTION, window_media
+
+    plan = build(
+        window_media(),
+        TrackSelection(audio=(1,), subtitles=(2,)),
+        WINDOW_DETECTION,
+        options=PlanOptions().with_capabilities(WINDOW_CAPABILITIES),
+    )
+
+    line = plan.meta_text.splitlines()[-1]
+    assert "video-width=1920, video-height=1080" in line
+
+
+def test_describe_plan_mentions_the_window_repair():
+    from .plan_jobs import plan_window_restore
+
+    lines = describe_plan(plan_window_restore())
+
+    assert any("restore the H.264 crop window to 1920x1080" in line for line in lines)
+    assert all(line.startswith(("source", "output", "temp", "mux", "splitting",
+                                "video", "audio", "subtitle", "prepare")) for line in lines)
+
+
+def test_a_window_crop_without_the_bitstream_filter_is_refused():
+    from .plan_jobs import WINDOW_DETECTION, window_media
+
+    with pytest.raises(PlanError, match="h264_metadata"):
+        build(
+            window_media(),
+            TrackSelection(audio=(1,), subtitles=(2,)),
+            WINDOW_DETECTION,
+        )
 
 
 # --------------------------------------------------------------------------
@@ -456,6 +523,32 @@ def test_plan_for_source_passes_extra_issues_into_the_report(runner, tmp_media):
     )
 
     assert "The drive is not FAT32." in plan.report.messages()
+
+
+def test_plan_for_source_asks_ffmpeg_before_refusing_a_window_crop(runner, tmp_media):
+    """A caller that never checked the toolchain still gets the repair."""
+    source = tmp_media("window.mkv")
+    runner.add_json(load_json("mkv_window_crop_h264_ac3_srt.json"))
+    runner.add_stdout(load_text("ffmpeg_encoders.txt"), match="-encoders")
+    runner.add_stdout(load_text("ffmpeg_bsfs.txt"), match="-bsfs")
+    runner.add_stdout(load_text("ffmpeg_muxers.txt"), match="-muxers")
+    runner.add_stdout(load_text("detect_mkv.txt"))
+
+    plan = plan_for_source(source, runner, output_dir=OUT, temp_dir=TEMP)
+
+    assert runner.phases == ["probe", "tools", "tools", "tools", "detect"]
+    assert [step.kind for step in plan.prep_steps] == ["video-window"]
+    assert plan.video is not None and plan.video.prepared
+
+
+def test_plan_for_source_does_not_probe_capabilities_for_a_plain_source(runner, tmp_media):
+    source = tmp_media("fixture_1080p.mkv")
+    runner.add_json(load_json("mkv_1080p_h264_ac3x2_srt.json"))
+    runner.add_stdout(load_text("detect_mkv.txt"))
+
+    plan_for_source(source, runner, output_dir=OUT, temp_dir=TEMP)
+
+    assert runner.phases == ["probe", "detect"], "no ffmpeg query for an untouched source"
 
 
 # --------------------------------------------------------------------------

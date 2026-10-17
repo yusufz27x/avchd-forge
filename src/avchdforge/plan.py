@@ -30,15 +30,18 @@ from .capabilities import FfmpegCapabilities
 from .errors import PlanError, ValidationFailed, format_argv
 from .meta import MetaTrack, MuxJob, MuxOptions, TrackKind, render_meta
 from .prep import (
+    WINDOW_BSFS,
     PrepStep,
     SubtitleStyle,
     VideoContext,
     plan_prep_steps,
     prep_step_to_meta_track,
+    window_missing_bsfs,
 )
 from .probe import MediaInfo, probe
 from .process import Runner
 from .selection import TrackSelection, default_selection
+from .tooling import detect_capabilities
 from .tracks import (
     RAW_STREAM_TRACK_ID,
     TrackIdMap,
@@ -122,8 +125,6 @@ class PlanOptions:
     mux: MuxOptions = field(default_factory=MuxOptions)
     capabilities: FfmpegCapabilities = field(default_factory=FfmpegCapabilities)
     subtitle_style: SubtitleStyle = field(default_factory=SubtitleStyle)
-    #: Preferences opt-in: non-standard video sizes are remuxed with a warning.
-    allow_nonstandard_resolution: bool = False
 
     def with_split_size(self, mb: int | None) -> PlanOptions:
         """FAT32 splitting on (default 4096 MB) or off."""
@@ -287,7 +288,6 @@ def build_plan(
         media,
         selection,
         decisions=decisions,
-        allow_nonstandard_resolution=plan_options.allow_nonstandard_resolution,
     )
     if not report.ok:
         raise ValidationFailed(report)
@@ -312,23 +312,59 @@ def build_plan(
     meta_tracks: list[MetaTrack] = []
     planned: list[PlannedTrack] = []
 
-    video_id = track_ids.require_one(video.index)
-    meta_tracks.append(
-        MetaTrack.video(media.path, video_id, language=video.language, fps=video.fps)
-    )
-    planned.append(
-        PlannedTrack(
-            kind="video",
-            index=video.index,
-            track_id=video_id,
-            family=codec_family(video.codec),
-            language=video.language,
-            source=media.path,
-            bitrate=video.bitrate,
-        )
-    )
-
     video_context = VideoContext.from_media(media)
+    video_step = _step_for(steps, ("video-window",), video.index)
+    if video.restore_window() is not None and video_step is None:
+        missing = window_missing_bsfs(plan_options.capabilities)
+        if plan_options.capabilities.is_empty:
+            hint = (
+                "the plan was built without ffmpeg capabilities, so there is no saying "
+                "whether the configured ffmpeg has them: pass the result of "
+                "avchdforge.tooling.detect_capabilities() through "
+                "PlanOptions.capabilities (plan_for_source does that on its own)"
+            )
+        else:
+            hint = (
+                f"the configured ffmpeg ({plan_options.ffmpeg!r}) does not advertise "
+                f"{', '.join(missing)}; install FFmpeg 4.1 or newer"
+            )
+        raise PlanError(
+            f"Video stream {video.index} is {video.resolution_label} and the coded rows "
+            f"that make it 1920x1080 again are in the file, but restoring them needs the "
+            f"ffmpeg bitstream filters {' + '.join(WINDOW_BSFS)}: {hint}."
+        )
+    if video_step is not None:
+        meta_tracks.append(prep_step_to_meta_track(video_step, video=video_context))
+        planned.append(
+            PlannedTrack(
+                kind="video",
+                index=video.index,
+                track_id=RAW_STREAM_TRACK_ID,
+                family=codec_family(video.codec),
+                language=video.language,
+                prepared=True,
+                source=video_step.output,
+                bitrate=video.bitrate,
+                note=video_step.label,
+            )
+        )
+    else:
+        video_id = track_ids.require_one(video.index)
+        meta_tracks.append(
+            MetaTrack.video(media.path, video_id, language=video.language, fps=video.fps)
+        )
+        planned.append(
+            PlannedTrack(
+                kind="video",
+                index=video.index,
+                track_id=video_id,
+                family=codec_family(video.codec),
+                language=video.language,
+                source=media.path,
+                bitrate=video.bitrate,
+            )
+        )
+
     for index in selection.sorted_audio():
         track = media.audio_track(index)
         decision = decisions.get(index)
@@ -473,12 +509,22 @@ def plan_for_source(
 ) -> JobPlan:
     """Probe ``source``, run tsMuxeR's detection, then build the plan.
 
-    This is the only function here that touches a process. ``selection=None``
-    means "the smart defaults" (:func:`~avchdforge.selection.default_selection`).
+    This is the only function here that touches a process (and the only one that
+    asks ffmpeg for its capabilities: a caller that did not check the toolchain
+    still gets a working window repair). ``selection=None`` means "the smart
+    defaults" (:func:`~avchdforge.selection.default_selection`).
     """
     plan_options = options or PlanOptions()
     path = _absolute(source)
     media = probe(path, runner, tool=ffprobe)
+    if plan_options.capabilities.is_empty and _needs_window_repair(media):
+        # The GUI checks the toolchain once at startup and passes the result
+        # down; a library caller usually has not, and refusing a repairable
+        # source over a capability nobody asked about would be wrong.
+        plan_options = replace(
+            plan_options,
+            capabilities=detect_capabilities(plan_options.ffmpeg, runner),
+        )
     chosen = selection if selection is not None else default_selection(
         media,
         audio_language_priority=language_priority,
@@ -488,7 +534,6 @@ def plan_for_source(
         media,
         chosen,
         extra_issues=list(extra_issues),
-        allow_nonstandard_resolution=plan_options.allow_nonstandard_resolution,
     )
     if not report.ok:
         raise ValidationFailed(report)
@@ -502,6 +547,12 @@ def plan_for_source(
         options=plan_options,
         report=report,
     )
+
+
+def _needs_window_repair(media: MediaInfo) -> bool:
+    """True when the video is cropped but the coded rows could be restored."""
+    video = media.video
+    return video is not None and video.restore_window() is not None
 
 
 def _absolute(path: Path | str) -> Path:

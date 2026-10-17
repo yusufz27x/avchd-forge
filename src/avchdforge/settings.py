@@ -58,7 +58,6 @@ FONT_NAME = "mux/font_name"
 FONT_SIZE = "mux/font_size"
 FONT_COLOR = "mux/font_color"
 BOTTOM_OFFSET = "mux/bottom_offset"
-ALLOW_NONSTANDARD_RESOLUTION = "mux/allow_nonstandard_resolution"
 
 AUDIO_PRIORITY = "langs/audio_priority"
 SUBTITLE_PRIORITY = "langs/subtitle_priority"
@@ -81,7 +80,6 @@ KNOWN_KEYS: tuple[str, ...] = (
     FONT_SIZE,
     FONT_COLOR,
     BOTTOM_OFFSET,
-    ALLOW_NONSTANDARD_RESOLUTION,
     AUDIO_PRIORITY,
     SUBTITLE_PRIORITY,
     KEEP_ON_SUCCESS,
@@ -96,7 +94,6 @@ DEFAULTS: dict[str, Any] = {
     FONT_SIZE: DEFAULT_FONT_SIZE,
     FONT_COLOR: DEFAULT_FONT_COLOR,
     BOTTOM_OFFSET: DEFAULT_BOTTOM_OFFSET,
-    ALLOW_NONSTANDARD_RESOLUTION: False,
     KEEP_ON_SUCCESS: False,
     KEEP_ON_FAILURE: True,
 }
@@ -265,14 +262,6 @@ class AppSettings:
         if value is not None:
             self.set_value(SPLIT_SIZE_MB, int(value))
 
-    @property
-    def allow_nonstandard_resolution(self) -> bool:
-        """Whether odd frame sizes are muxed with a warning instead of refused (V4)."""
-        return self._bool(ALLOW_NONSTANDARD_RESOLUTION, False)
-
-    def set_allow_nonstandard_resolution(self, allow: bool) -> None:
-        self.set_value(ALLOW_NONSTANDARD_RESOLUTION, allow)
-
     def subtitle_style(self) -> SubtitleStyle:
         """Font settings for tsMuxeR's SRT renderer."""
         return SubtitleStyle(
@@ -306,7 +295,6 @@ class AppSettings:
             mux=MuxOptions(split_size_mb=self.split_size_mb()),
             capabilities=capabilities if capabilities is not None else FfmpegCapabilities(),
             subtitle_style=self.subtitle_style(),
-            allow_nonstandard_resolution=self.allow_nonstandard_resolution,
         )
 
     # -- languages -------------------------------------------------------

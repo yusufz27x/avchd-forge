@@ -413,6 +413,45 @@ def test_composition_rejects_a_resolution_change(tmp_path: Path) -> None:
     assert any("resolution is 1280x720" in problem for problem in report.problems)
 
 
+def window_plan(tmp_path: Path) -> JobPlan:
+    """The 1036 source whose video prep step restores it to 1080."""
+    from .plan_jobs import WINDOW_CAPABILITIES, WINDOW_DETECTION, window_media
+
+    return build_plan(
+        window_media(),
+        TrackSelection(audio=(1,), subtitles=(2,)),
+        WINDOW_DETECTION,
+        output_dir=tmp_path / "out",
+        temp_dir=tmp_path / "tmp",
+        options=PlanOptions().with_capabilities(WINDOW_CAPABILITIES),
+    )
+
+
+def test_composition_expects_the_restored_resolution(tmp_path: Path) -> None:
+    plan = window_plan(tmp_path)
+    output = parse_ffprobe_json(
+        output_payload(vstream(0), astream(1), sstream(2, "hdmv_pgs_subtitle"))
+    )
+
+    report = check_stream_composition(plan, output)
+
+    assert report.ok, report.problems
+
+
+def test_composition_rejects_a_video_that_was_muxed_still_cropped(tmp_path: Path) -> None:
+    plan = window_plan(tmp_path)
+    output = parse_ffprobe_json(
+        output_payload(
+            vstream(0, width=1920, height=1036), astream(1), sstream(2, "hdmv_pgs_subtitle")
+        )
+    )
+
+    report = check_stream_composition(plan, output)
+
+    assert any("resolution is 1920x1036" in problem for problem in report.problems)
+    assert any("expected 1920x1080" in problem for problem in report.problems)
+
+
 def test_composition_rejects_a_subtitle_that_stayed_text(tmp_path: Path) -> None:
     plan = ac3_plan(tmp_path)
     output = parse_ffprobe_json(

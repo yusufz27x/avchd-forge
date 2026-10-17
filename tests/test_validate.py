@@ -12,7 +12,7 @@ from avchdforge.selection import TrackSelection
 from avchdforge.validate import validate_all, validate_container, validate_selection
 from avchdforge.validate_types import Issue, ValidationReport, error, warning
 
-from .conftest import astream, build_media, load_json, sstream, vstream
+from .conftest import DATA_DIR, astream, build_media, load_json, sstream, vstream
 
 
 def codes(report: ValidationReport, severity: str | None = None) -> set[str]:
@@ -23,6 +23,30 @@ def codes(report: ValidationReport, severity: str | None = None) -> set[str]:
     else:
         issues = report.issues
     return {issue.code for issue in issues}
+
+
+#: Real ``ffprobe -show_data`` extradata dumps (see ``tests/test_sps.py``).
+PLAIN_1080P = "avcc_plain_1080p.txt"
+WINDOW_CROP_1036 = "avcc_window_crop_1036.txt"
+HARD_CROP_1036 = "avcc_hard_crop_1036.txt"
+
+
+def sps_dump(name: str) -> str:
+    return (DATA_DIR / "sps" / name).read_text(encoding="utf-8")
+
+
+def window_cropped_video(**overrides):
+    """1920x1088 coded, window at 1920x1036: the bars are still coded."""
+    return vstream(
+        width=1920, height=1036, extradata=sps_dump(WINDOW_CROP_1036), **overrides
+    )
+
+
+def hard_cropped_video(**overrides):
+    """A real re-encode: 1920x1040 coded, window at 1920x1036 (BDRemux case)."""
+    return vstream(
+        width=1920, height=1036, extradata=sps_dump(HARD_CROP_1036), **overrides
+    )
 
 
 def issue(report: ValidationReport, code: str) -> Issue:
@@ -103,27 +127,55 @@ def test_v4_accepts_the_two_legal_resolutions(resolution):
     assert "V4" not in codes(validate_container(media))
 
 
-@pytest.mark.parametrize("resolution", [(1920, 1036), (1920, 1038), (1920, 800)])
-def test_v4_becomes_a_warning_when_non_standard_resolutions_are_allowed(resolution):
-    width, height = resolution
-    media = build_media([vstream(width=width, height=height), astream()])
+def test_v4_warns_when_the_coded_bars_are_still_in_the_stream():
+    media = build_media([window_cropped_video(), astream()])
 
-    report = validate_container(media, allow_nonstandard_resolution=True)
+    report = validate_container(media)
 
     assert report.ok is True
     assert "V4" in codes(report, "warning")
     assert "V4" not in codes(report, "error")
-    assert "1920x1080 or 1280x720" in issue(report, "V4").message
-    assert "not guaranteed" in issue(report, "V4").message
+    message = issue(report, "V4").message
+    assert "1920x1036" in message
+    assert "1920x1080" in message
+    assert "without touching a single coded pixel" in message
 
 
-def test_the_opt_in_does_not_excuse_other_errors():
-    media = build_media([vstream(width=1920, height=1036), vstream(index=2)])
+def test_v4_refuses_a_hard_cropped_re_encode():
+    media = build_media([hard_cropped_video(), astream()])
 
-    report = validate_container(media, allow_nonstandard_resolution=True)
+    report = validate_container(media)
+
+    assert report.ok is False
+    message = issue(report, "V4").message
+    assert "1920x1036" in message
+    assert "coded frame is 1920x1040" in message
+    assert "never re-encodes" in message
+
+
+def test_v4_refuses_a_cropped_source_without_geometry():
+    media = build_media([vstream(width=1920, height=1036), astream()])
+
+    message = issue(validate_container(media), "V4").message
+    assert "1920x1036" in message
+    assert "parameter set could not be read" in message
+
+
+def test_v4_stays_silent_for_a_1080p_stream_coded_as_1088():
+    # The usual Blu-ray layout (coded 1088, window at 1080): nothing to repair.
+    media = build_media([vstream(extradata=sps_dump(PLAIN_1080P)), astream()])
+
+    assert "V4" not in codes(validate_container(media))
+
+
+def test_a_repairable_resolution_does_not_hide_other_errors():
+    media = build_media([window_cropped_video(), vstream(index=2)])
+
+    report = validate_container(media)
 
     assert report.ok is False
     assert "V2" in codes(report, "error")
+    assert "V4" in codes(report, "warning")
 
 
 def test_v5_warns_above_level_41():
@@ -340,15 +392,41 @@ def test_validate_all_reports_container_errors(ac3_media):
     assert validate_all(bad, TrackSelection(audio=(1,))).ok is False
 
 
-def test_validate_all_passes_the_non_standard_resolution_opt_in():
-    media = build_media([vstream(width=1920, height=1036), astream()])
+def test_validate_all_reports_a_repairable_window_crop():
+    media = build_media([window_cropped_video(), astream()])
 
-    assert validate_all(media, TrackSelection(audio=(1,))).ok is False
-    allowed = validate_all(
-        media, TrackSelection(audio=(1,)), allow_nonstandard_resolution=True
+    report = validate_all(media, TrackSelection(audio=(1,)))
+
+    assert report.ok is True
+    assert "V4" in {item.code for item in report.warnings}
+
+
+def test_v6_uses_the_restored_height():
+    # 59.94 fps is fine at 720p but not at 1080p; the disc will be 1080p.
+    media = build_media(
+        [
+            window_cropped_video(avg_frame_rate="60000/1001", r_frame_rate="60000/1001"),
+            astream(),
+        ]
     )
-    assert allowed.ok is True
-    assert "V4" in {item.code for item in allowed.warnings}
+
+    report = validate_container(media)
+
+    assert "V6" in codes(report, "warning")
+
+
+def test_v13_compares_against_the_restored_size():
+    media = build_media(
+        [
+            window_cropped_video(),
+            astream(),
+            sstream(width=1920, height=1080),  # fits the 1080 frame, not the 1036 one
+        ]
+    )
+
+    report = validate_selection(media, TrackSelection(audio=(1,), subtitles=(2,)))
+
+    assert "V13" not in codes(report)
 
 
 def test_issue_and_report_helpers(ac3_media):

@@ -13,6 +13,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from avchdforge.capabilities import FfmpegCapabilities
 from avchdforge.plan import JobPlan, PlanOptions, build_plan
 from avchdforge.probe import parse_ffprobe_json
 from avchdforge.selection import TrackSelection
@@ -132,7 +133,52 @@ def plan_basic() -> JobPlan:
     )
 
 
+#: tsMuxeR's report for the window-cropped fixture (AC-3 + SubRip).
+WINDOW_DETECTION = parse_detect_output(
+    "tsMuxeR version 2.7.0. github.com/justdan96/tsMuxer\n"
+    "Track ID:    1\n"
+    "Stream type: H.264\n"
+    "Stream ID:   V_MPEG4/ISO/AVC\n"
+    "Stream info: Profile: High@4.1  Resolution: 1920:1036p  Frame rate: 23.976\n"
+    "Stream lang: und\n"
+    "\n"
+    "Track ID:    2\n"
+    "Stream type: AC3\n"
+    "Stream ID:   A_AC3\n"
+    "Stream lang: eng\n"
+    "\n"
+    "Track ID:    3\n"
+    "Stream type: SRT\n"
+    "Stream ID:   S_TEXT/UTF8\n"
+    "Stream lang: eng\n"
+)
+
+#: The bitstream filters that rewrite the conformance window and put the
+#: rewritten parameter sets in-band (FFmpeg 4.1+).
+WINDOW_CAPABILITIES = FfmpegCapabilities(
+    bitstream_filters=frozenset({"dca_core", "eac3_core", "h264_metadata", "dump_extra"})
+)
+
+
+def window_media():
+    """1920x1088 coded, window at 1920x1036: the bars are still in the stream."""
+    return parse_ffprobe_json(fixture("mkv_window_crop_h264_ac3_srt.json"), SOURCE)
+
+
+def plan_window_restore() -> JobPlan:
+    """Cropped 1036 source: the video ES is window-restored, then muxed."""
+    return build_plan(
+        window_media(),
+        TrackSelection(audio=(1,), subtitles=(2,)),
+        WINDOW_DETECTION,
+        output_dir=OUTPUT,
+        temp_dir=TEMP,
+        options=PlanOptions().with_capabilities(WINDOW_CAPABILITIES),
+    )
+
+
 JOBS: dict[str, Callable[[], JobPlan]] = {
     "plan_hd_cores": plan_hd_cores,
     "plan_basic": plan_basic,
+    "plan_window_restore": plan_window_restore,
 }

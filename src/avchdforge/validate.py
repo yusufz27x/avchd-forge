@@ -23,7 +23,7 @@ from .constants import (
     MAX_H264_LEVEL,
     VIDEO_BITRATE_WARN_BPS,
 )
-from .probe import MediaInfo
+from .probe import MediaInfo, VideoTrack
 from .selection import TrackSelection
 from .validate_types import Issue, IssueCollector, ValidationReport
 
@@ -36,23 +36,15 @@ def validate_container(
     media: MediaInfo,
     *,
     check_extension: bool = True,
-    allow_nonstandard_resolution: bool = False,
     collector: IssueCollector | None = None,
 ) -> ValidationReport:
-    """Everything that can be decided by looking at the source alone.
-
-    ``allow_nonstandard_resolution`` is the Preferences opt-in: V4 drops from an
-    error to a warning, so cropped 1080p releases (1920x1036 and friends) can be
-    tried on the PS3 without pretending they are AVCHD-compliant.
-    """
+    """Everything that can be decided by looking at the source alone."""
     collect = collector or IssueCollector()
 
     if check_extension:
         _check_extension(media, collect)
 
-    _check_video_streams(
-        media, collect, allow_nonstandard_resolution=allow_nonstandard_resolution
-    )
+    _check_video_streams(media, collect)
     _check_audio_streams(media, collect)
     _check_subtitle_streams(media, collect)
 
@@ -76,11 +68,28 @@ def _check_extension(media: MediaInfo, collect: IssueCollector) -> None:
         )
 
 
+def _unfixable_resolution_message(video: VideoTrack) -> str:
+    """Why a non-standard size cannot be repaired losslessly (V4, error case)."""
+    base = (
+        f"Video stream {video.index} is {video.resolution_label}; AVCHD requires exactly "
+        "1920x1080 or 1280x720, and this file cannot be brought there losslessly: "
+    )
+    geometry = video.sps
+    if geometry is None:
+        return base + (
+            "the H.264 sequence parameter set could not be read, so there is no way to "
+            "tell whether the missing lines are still coded (avchd-forge never re-encodes)."
+        )
+    return base + (
+        f"the coded frame is {geometry.coded_width}x{geometry.coded_height} and its "
+        "conformance window cannot be rewritten to show the missing lines without cutting "
+        "visible picture (avchd-forge never re-encodes)."
+    )
+
+
 def _check_video_streams(
     media: MediaInfo,
     collect: IssueCollector,
-    *,
-    allow_nonstandard_resolution: bool = False,
 ) -> None:
     if not media.videos:
         collect.error("V2", "No video stream found. Is this really a BDRemux?")
@@ -105,22 +114,18 @@ def _check_video_streams(
 
         resolution = (video.width, video.height)
         if resolution not in ALLOWED_RESOLUTIONS:
-            if allow_nonstandard_resolution:
+            restore = video.restore_window()
+            if restore is not None:
                 collect.warning(
                     "V4",
-                    f"Video stream {video.index} is {video.resolution_label}; AVCHD "
-                    "wants exactly 1920x1080 or 1280x720. Remuxing it anyway because "
-                    "non-standard resolutions are allowed: the PS3 usually plays "
-                    "cropped 1080p, but playback is not guaranteed.",
+                    f"Video stream {video.index} is {video.resolution_label} with the bars "
+                    "still coded; the mux restores the H.264 crop window to "
+                    f"{restore.target_width}x{restore.target_height} without touching a "
+                    "single coded pixel.",
                     video.index,
                 )
             else:
-                collect.error(
-                    "V4",
-                    f"Video stream {video.index} is {video.resolution_label}; AVCHD requires "
-                    "exactly 1920x1080 or 1280x720.",
-                    video.index,
-                )
+                collect.error("V4", _unfixable_resolution_message(video), video.index)
 
         if video.level is None:
             collect.warning(
@@ -138,7 +143,7 @@ def _check_video_streams(
                 video.index,
             )
 
-        ceiling = MAX_FPS_BY_HEIGHT.get(video.height or 0)
+        ceiling = MAX_FPS_BY_HEIGHT.get(video.output_resolution[1] or 0)
         if ceiling and video.fps and video.fps > ceiling + 0.05:
             collect.warning(
                 "V6",
@@ -277,14 +282,14 @@ def validate_selection(
             )
             continue
         video = media.video
+        output_width, output_height = video.output_resolution if video else (None, None)
         if (
             track.is_pgs
-            and video is not None
             and track.width
             and track.height
-            and video.width
-            and video.height
-            and (track.width > video.width or track.height > video.height)
+            and output_width
+            and output_height
+            and (track.width > output_width or track.height > output_height)
         ):
             collect.warning(
                 "V13",
@@ -314,7 +319,6 @@ def validate_all(
     decisions: dict[int, AudioDecision] | None = None,
     extra_issues: Iterable[Issue] = (),
     check_extension: bool = True,
-    allow_nonstandard_resolution: bool = False,
 ) -> ValidationReport:
     """Container + selection + whatever the caller learned from the target drive."""
     decisions = decisions if decisions is not None else decide_audio_all(media)
@@ -322,7 +326,6 @@ def validate_all(
     validate_container(
         media,
         check_extension=check_extension,
-        allow_nonstandard_resolution=allow_nonstandard_resolution,
         collector=collector,
     )
     validate_selection(media, selection, decisions=decisions, collector=collector)

@@ -19,7 +19,8 @@ import pytest
 pytest.importorskip("PySide6", reason="jobs.py is Qt orchestration")
 pytest.importorskip("pytestqt", reason="the job tests use pytest-qt")
 
-from avchdforge.errors import ExistingTreeError, ValidationFailed
+from avchdforge.capabilities import FfmpegCapabilities
+from avchdforge.errors import ExistingTreeError, PlanError, ValidationFailed
 from avchdforge.jobs import (
     PLAN_STAGE_LABEL,
     TEMP_PREFIX,
@@ -37,6 +38,7 @@ from avchdforge.probe import parse_ffprobe_json
 from avchdforge.selection import TrackSelection
 
 from .conftest import (
+    DATA_DIR,
     FakeResponse,
     FakeRunner,
     astream,
@@ -173,6 +175,11 @@ def script_success(runner: FakeRunner) -> None:
 
 def _json(payload: dict[str, Any]) -> str:
     return json.dumps(payload)
+
+
+def sps_dump(name: str) -> str:
+    """A real ``ffprobe -show_data`` extradata dump from ``tests/data/sps``."""
+    return (DATA_DIR / "sps" / name).read_text(encoding="utf-8")
 
 
 # --------------------------------------------------------------------------
@@ -572,25 +579,53 @@ def test_build_job_plan_refuses_an_existing_avchd_tree(tmp_path: Path) -> None:
     assert "already contains an AVCHD structure" in str(excinfo.value)
 
 
-def test_build_job_plan_can_allow_a_non_standard_resolution(tmp_path: Path) -> None:
+def test_build_job_plan_restores_a_window_cropped_source(tmp_path: Path) -> None:
     runner = FakeRunner()
-    cropped = _json(output_payload(vstream(0, height=1036), astream(1)))
-    runner.add_stdout(cropped, match="ffprobe")
-    runner.add_stdout(cropped, match="ffprobe")
+    runner.add_stdout(_json(load_json("mkv_window_crop_h264_ac3_srt.json")), match="ffprobe")
     runner.add_stdout(DETECTION, match=".mkv")
-
-    with pytest.raises(ValidationFailed):
-        build_job_plan(request_for(tmp_path), runner, temp_dir=tmp_path / "tmp")
+    capabilities = FfmpegCapabilities(
+        bitstream_filters=frozenset({"h264_metadata", "dump_extra"})
+    )
 
     plan = build_job_plan(
-        request_for(tmp_path, options=PlanOptions(allow_nonstandard_resolution=True)),
+        request_for(tmp_path, options=PlanOptions(capabilities=capabilities)),
         runner,
         temp_dir=tmp_path / "tmp",
     )
 
     assert plan.report.ok
     assert "V4" in {issue.code for issue in plan.report.warnings}
-    assert [track.track_id for track in plan.tracks] == [1, 2]
+    assert [track.kind for track in plan.tracks] == ["video", "audio"]
+    video = plan.video
+    assert video is not None
+    assert video.prepared is True
+    assert video.track_id == 0  # raw elementary stream, like an extracted core
+    assert video.source.name.endswith(".264")
+    assert plan.prep_steps[0].kind == "video-window"
+    assert "1920x1080" in plan.prep_steps[0].label
+
+
+def test_build_job_plan_refuses_a_window_crop_without_the_bitstream_filter(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner()
+    runner.add_stdout(_json(load_json("mkv_window_crop_h264_ac3_srt.json")), match="ffprobe")
+    runner.add_stdout(DETECTION, match=".mkv")
+
+    with pytest.raises(PlanError, match="h264_metadata"):
+        build_job_plan(request_for(tmp_path), runner, temp_dir=tmp_path / "tmp")
+
+
+def test_build_job_plan_still_refuses_a_hard_cropped_source(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    hard_crop = sps_dump("avcc_hard_crop_1036.txt")
+    runner.add_stdout(
+        _json(output_payload(vstream(0, height=1036, extradata=hard_crop), astream(1))),
+        match="ffprobe",
+    )
+
+    with pytest.raises(ValidationFailed):
+        build_job_plan(request_for(tmp_path), runner, temp_dir=tmp_path / "tmp")
 
 
 def test_build_job_plan_uses_defaults_when_no_selection_is_given(tmp_path: Path) -> None:

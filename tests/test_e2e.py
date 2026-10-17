@@ -162,6 +162,31 @@ def _run_pipeline(
     return execute_plan(plan, runner, ffprobe=str(tools["ffprobe"]))
 
 
+@pytest.fixture(scope="session")
+def window_sample(tools: dict[str, Path], sample: Path, tmp_path_factory) -> Path:
+    """The sample's video with a window crop, as a BDRemux release ships it.
+
+    A 1080p x264 encode is coded as 1920x1088 with the bottom eight rows hidden
+    by the SPS conformance window. Replacing that window with 26/26 shows
+    1920x1036 while the coded frame keeps every row: the Case A shape whose
+    repair must be lossless (``docs/CONTEXT.md`` §2.12).
+    """
+    work = tmp_path_factory.mktemp("e2e-window")
+    cropped = work / "window.mkv"
+    argv = [
+        str(tools["ffmpeg"]),
+        "-nostdin", "-hide_banner", "-v", "error", "-y",
+        "-i", str(sample),
+        "-map", "0:v:0", "-map", "0:a:0",
+        "-c", "copy",
+        "-bsf:v", "h264_metadata=crop_top=26:crop_bottom=26",
+        str(cropped),
+    ]
+    result = SubprocessRunner().run(argv, phase="e2e")
+    assert result.ok, f"could not generate the window-cropped sample:\n{result.tail(15)}"
+    return cropped
+
+
 def test_generated_media_remuxes_into_a_verified_avchd_tree(
     tools: dict[str, Path], sample: Path, tmp_path: Path
 ) -> None:
@@ -192,6 +217,33 @@ def test_generated_media_remuxes_into_a_verified_avchd_tree(
     assert [track.codec for track in media.audio] == ["ac3", "ac3"]
     assert {track.channels for track in media.audio} == {6, 2}
     assert [track.codec for track in media.subtitles] == ["hdmv_pgs_subtitle"]
+
+
+def test_a_window_cropped_source_is_restored_to_1080p_losslessly(
+    tools: dict[str, Path], window_sample: Path, tmp_path: Path
+) -> None:
+    runner = SubprocessRunner()
+    source_media = probe(window_sample, runner, tool=str(tools["ffprobe"]))
+    video = source_media.video
+    assert video is not None
+    assert (video.width, video.height) == (1920, 1036), "the release shows 1036 lines"
+    assert video.coded_resolution == (1920, 1088), "the missing rows are still coded"
+    assert video.output_resolution == (1920, 1080)
+
+    outcome = _run_pipeline(
+        window_sample, tools, tmp_path / "out", tmp_path / "temp", split_size_mb=4096
+    )
+
+    assert [step.kind for step in outcome.plan.prep_steps] == ["video-window"]
+    assert outcome.plan.video is not None and outcome.plan.video.track_id == 0
+    assert not (tmp_path / "temp").exists(), "a successful job must clean up its temp dir"
+
+    media = probe(outcome.stream_files[0], SubprocessRunner(), tool=str(tools["ffprobe"]))
+    assert media.video is not None
+    assert media.video.codec == "h264", "video must be copied, not re-encoded"
+    assert (media.video.width, media.video.height) == (1920, 1080)
+    assert [track.codec for track in media.audio] == ["ac3"]
+    assert media.audio[0].channels == 6
 
 
 def test_small_split_size_produces_multiple_parts_within_the_limit(

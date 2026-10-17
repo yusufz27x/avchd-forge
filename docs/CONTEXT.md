@@ -287,6 +287,48 @@ at the drive root): no XMB entry, parts played from the file browser. The rename
 is what avchd-forge now does after every mux (D22); live confirmation with a PS3
 is still pending.
 
+### 2.12 Cropped 1080p sources: window crop (repairable) vs hard crop (refused)
+
+The reporter's PS3 does not accept a 1920x1036 title, and ffprobe cannot tell
+the two shapes apart: it reports the *displayed* size, and `coded_width`/
+`coded_height` mirror it in Matroska and MPEG-TS. The coded frame size and the
+H.264 conformance window live only in the SPS, which `ffprobe -show_data` prints
+as a hexdump; `avchdforge.sps` parses it and `VideoTrack` carries it as
+`sps` / `coded_resolution` / `restore_window()` / `output_resolution`. Measured
+on the two real shapes:
+
+* **hard crop** — the reporter's `…-BluHD.mkv`: High@4.1, coded 1920x1040,
+  window `0/0/0/4` px, display 1920x1036. The 1080 lines were never encoded;
+  only a re-encode could invent them, so V4 stays a hard error with no override.
+* **window crop** — a 1080p x264 encode is coded 1920x1088 with the bottom eight
+  rows hidden by the window; a letterboxed release can set `crop_top=26:
+  crop_bottom=26` and show 1920x1036 while every row stays coded. Here
+  `restore_window()` proposes `crop_left=0:crop_right=0:crop_top=0:
+  crop_bottom=8`, a rewrite of the window only.
+
+The repair runs over `-c:v copy` through FFmpeg's `h264_metadata` (4.1+): the
+coded pictures are bit-for-bit copies, and the prep step emits a raw `.264` that
+tsMuxeR muxes as `track=0` (D9). Verified with the real tools
+(`pytest -m e2e`, generated media):
+
+* tsMuxeR detects the untouched file as `1920:1036p` and the repaired one as
+  `1920:1080p`; the muxed `.MTS` probes as 1920x1080 H.264 with its AC-3 track
+  intact and the temp dir cleaned up.
+* `h264_metadata` alone is **not** enough: it emits a headerless elementary
+  stream — the rewritten SPS/PPS are not copied to the output — so ffprobe reads
+  `0x0` and tsMuxeR gets nothing usable. The chain must end with `dump_extra`
+  (`h264_metadata=…,dump_extra`), which puts the rewritten parameter sets
+  in-band. Both filters are required; the plan refuses the file when either is
+  missing, and its message distinguishes "this ffmpeg cannot" from "nobody
+  asked for the dependent filters".
+* the rows the repair exposes are the stream's own pixels, not paint: in the
+  fixture the newly shown bands (coded rows 0–26 and 1062–1080) measure
+  `YAVG 16.12` / `YAVG 15.79` (YMIN 13, YMAX 25 — studio black) and the x264
+  padding rows just below them (1080–1088) `YAVG 15.94` (YMAX 16).
+
+A sampled-luma check of the to-be-exposed rows before planning is a possible
+follow-up (see §4).
+
 ## 3. Decision log
 
 | # | Date | Decision | Why |
@@ -310,11 +352,12 @@ is still pending.
 | D17 | 2026-10-15 | Start is blocked only by missing tools, unusable media, no output folder or a read-only target; V15/V16 target warnings never block; the free-space estimate is `int(media.size_bytes * OUTPUT_OVERHEAD)` until a `JobPlan` exists | warnings must inform, not refuse (the brief), and the source size is the only estimate available before the plan is built; the mux re-packages the same streams, so the source size is the right ballpark |
 | D18 | 2026-10-15 | The startup gate is a `QMessageBox` that answers with a plain string (`recheck` / `preferences` / `continue` / `quit`); *Continue* exists **only** when the report is usable, the searched locations live in the details area, and anything that is not one of the buttons (Esc, the window manager) means *quit*; `main()` exits `1` when the gate is quit | a warned-but-working toolchain (old ffmpeg) must be continuable while a missing tsMuxeR must not, and guessing "continue" on a broken toolchain produces a half-written disc with no explanation; strings keep the loop drivable from `main()` and from tests without a modal event loop |
 | D19 | 2026-10-15 | Preferences edits *stored* state and never adopts it before OK: `MainWindow.check_tools(overrides, *, adopt=False)` answers without touching the window (so an unsaved typo cannot disable Start), and the split size is read/written as `AppSettings.stored_split_size_mb()` — independent of `split_enabled` — with the spin's maximum derived from `(FAT32_MAX_BYTES - SPLIT_OVERSHOOT_ALLOWANCE) // SPLIT_MB_BYTES` | an open dialog is not a decision yet; and editing the *effective* split size (which is `None` while splitting is off) reset a custom value to the default on every open-and-OK — the same reasoning as "V15/V16 inform, they do not block" |
-| D20 | 2026-10-16 | A non-standard video resolution stays a hard V4 error by default; the Muxing-tab preference `mux/allow_nonstandard_resolution` downgrades it to a warning, and the flag travels in `PlanOptions` so `build_job_plan`/`plan_for_source`/`build_plan` re-validate with the same policy; changing it re-checks the loaded source in `open_preferences` | cropped 1.85:1 BDRemux releases (1920x1036/1038) are common and often play on the PS3, but they are outside AVCHD and cannot be padded losslessly (that needs a re-encode); a default-off opt-in keeps the strict guarantee while letting the user take the risk knowingly |
+| D20 | 2026-10-16 | ~~A non-standard video resolution stays a hard V4 error by default; the Muxing-tab preference `mux/allow_nonstandard_resolution` downgrades it to a warning…~~ **Superseded by D25 (2026-10-17): the opt-in and the key are gone** | cropped 1.85:1 BDRemux releases (1920x1036/1038) are common and often play on the PS3, but they are outside AVCHD and cannot be padded losslessly (that needs a re-encode); a default-off opt-in keeps the strict guarantee while letting the user take the risk knowingly |
 | D21 | 2026-10-16 | An output folder that already contains an AVCHD tree (`BDMV/` or `AVCHD/BDMV/`, rule V20) blocks a job: `TargetReport.errors` disables Start, and `build_job_plan` raises `ExistingTreeError` before any tool runs. This extends D17's blocker list; V15/V16 stay warnings. | tsMuxeR writes fixed names (`index.bdmv`, `00000.m2ts`, …), so a second run into the same folder silently overwrites the first title; a stock PS3 recognises only one AVCHD structure per drive, so one folder per title is the layout that keeps every movie on the stick |
 | D22 | 2026-10-16 | After the mux, a job renames tsMuxeR's tree to the AVCHD-on-FAT32 names (`INDEX.BDM`, `MOVIEOBJ.BDM`, `*.MPL`, `*.CPI`, `*.MTS`; `BACKUP/` included) **before** verification; the verifier accepts either flavour's names, and the outcome reports the shipped `.MTS` parts | the PS3 only mounts AVCHD from USB in the FAT32 flavour (§2.11); shipping tsMuxeR's optical names means the disc never appears in the XMB although the parts play as files. Renaming before verification keeps "what was verified" identical to "what ships" |
 | D23 | 2026-10-16 | The mux destination is `<chosen folder>/AVCHD` unless the chosen folder is itself named `AVCHD` (case-insensitive); `plan.avchd_destination` normalises it inside `build_plan`, `run_mux` creates the folder, and the cancellation leftover scan looks there | the PS3 mounts AVCHD from a USB drive root only from a folder called `AVCHD` (§2.11), and making the user create or select that folder is a needless failure point. Pointing at the drive root now just works, and pointing at an existing `AVCHD` folder does not nest a second one |
 | D24 | 2026-10-17 | The run bar weighs the phases by the data they move: a prep step is `PREP_STEP_WEIGHT = 1` (one read of the source), the mux `MUX_WEIGHT = 2` (that read plus the write), and the post-mux tail (flush, index, playlist, rename, verify, cleanup) a fixed `TAIL_SHARE = 2%` | with verification holding a whole unit of the bar, the mux ended at `(n+1)/(n+2)` — 80% with the reporter's three prep steps — and the tail then jumped the bar to 100%; the tail is seconds against the mux's minutes, so the transfer must end near the top |
+| D25 | 2026-10-17 | Non-standard video sizes are repaired or refused, never tolerated: V4 warns when `VideoTrack.restore_window()` finds a lossless SPS-window rewrite (the plan then carries a `video-window` prep step, `-c:v copy -bsf:v h264_metadata=…,dump_extra`, muxed from the raw ES as `track=0`) and stays a hard error otherwise; `restore_window()` also feeds the subtitle render size, the V6 frame-rate ceiling and the V13 PGS check with the *output* size, and `check_prep_output`/`_video_problem` verify the repaired size. The `mux/allow_nonstandard_resolution` opt-in is removed everywhere (`AppSettings`, `PlanOptions`, the Preferences checkbox, the re-check on policy change, `jobs`/`plan` re-validation) | D20's premise ("the PS3 usually plays cropped 1080p") is falsified — the reporter's PS3 refused 1920x1036 — so the opt-in only produced titles that were outside AVCHD *and* unplayable, while a warning the user could not act on is worse than none. Window-cropped releases are common and the repair is bit-exact (§2.12), so the two shapes deserve opposite verdicts rather than one override: repairable → warn and do it; unreachable → refuse, because only a re-encode could pad it and avchd-forge never re-encodes |
 
 ## 4. Open items
 
@@ -322,10 +365,14 @@ is still pending.
   the detection layout — the parser is deliberately lenient about spacing.
 * AVCHD legality of AAC and of level 4.2 is treated as a warning, not an error
   (PS3 plays both); revisit only if users report rejections.
-* Non-standard resolutions ride the same philosophy behind the default-off
-  `mux/allow_nonstandard_resolution` opt-in (D20). The PS3 verdict is
-  unverified — ideally one cropped (1920x1036/1038) sample gets tested live and
-  the outcome recorded here.
+* Non-standard resolutions are handled by the window repair (D25/§2.12): a
+  fixable 1920x1036 is warned about and restored to 1920x1080, an unreachable one
+  is refused with no override. The repair is verified end-to-end with generated
+  media and the real tools, but it has not been on a PS3 yet, and no *real*
+  window-cropped release has been through it (the reporter's sample was a hard
+  crop). Follow-up worth doing: sample the luma of the rows a repair would
+  expose (one decoded frame is enough) and warn when they are not (near-)black,
+  i.e. when the release cropped picture rather than bars.
 * The FAT32 rename (§2.11/D22) has not been on a PS3 yet: the reporter's console
   did not mount the long-name tree (parts played individually), and the renamed
   output is the scene-established fix. Confirm live and record the result here.

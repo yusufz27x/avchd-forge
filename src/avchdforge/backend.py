@@ -636,11 +636,13 @@ def _video_problem(plan: JobPlan, track: PlannedTrack, stream: VideoTrack) -> st
     if family != track.family:
         return f"video stream is {stream.codec.upper()} ({family}), expected {track.family}"
     source = plan.media.video
-    if source is not None and (stream.width, stream.height) != (source.width, source.height):
-        return (
-            f"video resolution is {stream.width}x{stream.height}, "
-            f"expected {source.width}x{source.height}"
-        )
+    if source is not None:
+        expected = source.output_resolution
+        if (stream.width, stream.height) != expected:
+            return (
+                f"video resolution is {stream.width}x{stream.height}, "
+                f"expected {expected[0]}x{expected[1]}"
+            )
     return None
 
 

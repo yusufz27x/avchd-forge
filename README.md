@@ -120,9 +120,14 @@ folder, and the source can also be dragged onto the window.
 ## What the PS3 accepts (compatibility rules)
 
 **Video — never re-encoded.** Hard errors: not exactly one video stream, codec
-not H.264/AVC, resolution not exactly 1920×1080 or 1280×720. Warnings: H.264
-level above 4.1, 1080-line frame rate above 30 (720-line above 60), interlaced
-input, bitrate above 24 Mbps.
+not H.264/AVC, resolution that cannot be brought to exactly 1920×1080 or
+1280×720. Many "cropped" releases (1920×1036 …) are only *window-cropped*: the
+full 1080 lines are still coded and hidden by the H.264 conformance window. For
+those avchd-forge rewrites the window (a bitstream filter over a stream copy —
+not one coded pixel is touched) and warns that it did; releases whose rows were
+never encoded are refused, because padding them would need a re-encode.
+Warnings: H.264 level above 4.1, 1080-line frame rate above 30 (720-line above
+60), interlaced input, bitrate above 24 Mbps.
 
 **Audio — copied, or core-extracted.** No full audio re-encode ever happens:
 

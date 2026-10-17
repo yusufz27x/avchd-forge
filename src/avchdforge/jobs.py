@@ -212,7 +212,6 @@ def build_job_plan(request: JobRequest, runner: Runner, *, temp_dir: Path) -> Jo
     report = validate_all(
         media,
         selection,
-        allow_nonstandard_resolution=request.options.allow_nonstandard_resolution,
     )
     if not report.ok:
         raise ValidationFailed(report)

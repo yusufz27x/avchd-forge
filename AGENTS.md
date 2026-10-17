@@ -36,6 +36,7 @@ src/avchdforge/     application package (src layout)
   errors.py         exception hierarchy
   validate_types.py Issue/ValidationReport (no imports beyond constants)
   probe.py          ffprobe JSON -> MediaInfo/VideoTrack/AudioTrack/SubtitleTrack
+  sps.py            H.264 SPS parse: coded size + window -> lossless repair? (pure)
   audio.py          per-track verdict: copy, extract core, or refuse
   selection.py      which tracks the user picked + smart defaults
   validate.py       compatibility rules -> Issues (error/warning)
@@ -43,7 +44,7 @@ src/avchdforge/     application package (src layout)
   tracks.py         tsMuxeR detection run + ffprobe <-> track-id mapping
   plan.py           MediaInfo + user selection -> JobPlan (steps + meta text)
   capabilities.py   what the installed ffmpeg can do (encoders, bitstream filters)
-  prep.py           ffmpeg argv for audio-core extraction / subtitle conversion
+  prep.py           ffmpeg argv for window repair / audio cores / subtitle conversion
   tooling.py        tool discovery, version + capability probing
   process.py        Runner protocol, SubprocessRunner, QProcessRunner
   progress.py       progress-line parsers (tsMuxeR, ffmpeg -progress)

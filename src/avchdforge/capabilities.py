@@ -32,6 +32,21 @@ class FfmpegCapabilities:
     def has_bsf(self, name: str) -> bool:
         return name in self.bitstream_filters
 
+    @property
+    def is_empty(self) -> bool:
+        """True for a default-constructed instance: nothing was probed yet.
+
+        ``plan_for_source`` uses this to decide whether it has to ask the
+        installed ffmpeg itself, instead of mistaking "nobody checked" for
+        "this build cannot do it".
+        """
+        return not (
+            self.has_pgs_encoder
+            or self.subtitle_encoders
+            or self.bitstream_filters
+            or self.muxers
+        )
+
     def has_subtitle_encoder(self, name: str) -> bool:
         return name in self.subtitle_encoders
 

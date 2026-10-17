@@ -299,33 +299,22 @@ def test_a_split_change_re_assesses_the_target(tmp_path: Path, monkeypatch) -> N
     assert "Enable splitting" in window.output_warning.text()
 
 
-def test_allowing_non_standard_resolutions_unblocks_a_cropped_source(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_a_window_cropped_source_is_repaired_not_blocked(tmp_path: Path) -> None:
     runner = FakeRunner()
     runner.add_stdout(
-        json.dumps(output_payload(vstream(0, height=1036), astream(1))), match="ffprobe"
+        json.dumps(load_json("mkv_window_crop_h264_ac3_srt.json")), match="ffprobe"
     )
     window = make_window(tmp_path, runner)
     window.open_source(write_source(tmp_path))
     window.set_output_dir(tmp_path / "out")
 
-    assert not window.track_view.report.ok
-    assert not window.start_button.isEnabled()
-    assert "1920x1036" in window.start_button.toolTip()
-
-    def fake_exec(_dialog: PreferencesDialog) -> int:
-        window._settings.set_allow_nonstandard_resolution(True)
-        return QtWidgets.QDialog.DialogCode.Accepted
-
-    monkeypatch.setattr(PreferencesDialog, "exec", fake_exec)
-
-    assert window.open_preferences() is True
-
-    assert window.track_view.report.ok
-    assert "V4" in {issue.code for issue in window.track_view.report.warnings}
+    report = window.track_view.report
+    assert report.ok
+    assert "V4" in {issue.code for issue in report.warnings}
+    assert "1920x1080" in next(
+        issue.message for issue in report.warnings if issue.code == "V4"
+    )
     assert window.start_button.isEnabled()
-    assert "resolution policy changed" in window.log_pane.text()
 
 
 def test_the_menu_closes_while_a_job_runs(tmp_path: Path) -> None:
