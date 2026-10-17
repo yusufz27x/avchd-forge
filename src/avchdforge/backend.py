@@ -343,6 +343,19 @@ def rename_tree_for_usb(output_dir: Path | str) -> tuple[str, ...]:
 # execution
 # --------------------------------------------------------------------------
 
+#: Run-bar weight of one prep step: it reads the whole source once.
+PREP_STEP_WEIGHT: Final[float] = 1.0
+#: Run-bar weight of the mux: one full read of the source plus one full write
+#: of the output, where a prep step only reads.
+MUX_WEIGHT: Final[float] = 2.0
+#: Share of the bar reserved for the work after the mux — the write-buffer
+#: flush, the stream index and playlist, the AVCHD-on-FAT32 rename,
+#: verification and cleanup. That tail is seconds against the mux's minutes,
+#: so it must not hold a whole unit of the bar the way a prep step does: with
+#: a unit of its own the mux ended at ``(steps + 1) / (steps + 2)`` of the bar
+#: — 80% with three prep steps — and everything after it jumped to 100%.
+TAIL_SHARE: Final[float] = 0.02
+
 
 def execute_plan(
     plan: JobPlan,
@@ -373,20 +386,25 @@ def execute_plan(
     """
     temp_owned = (not plan.temp_dir.exists()) if owns_temp is None else owns_temp
     plan.temp_dir.mkdir(parents=True, exist_ok=True)
-    total_units = len(plan.prep_steps) + 2  # every prep step, the mux, the verify
+    # The bar weighs the phases by the data they move (see the constants above):
+    # every prep step and the mux share everything but TAIL_SHARE.
+    prep_weight = len(plan.prep_steps) * PREP_STEP_WEIGHT
+    total_weight = prep_weight + MUX_WEIGHT
+    measurable = 1.0 - TAIL_SHARE
 
     def announce(key: StageKey, label: str, index: int = 0, total: int = 1) -> None:
         if on_stage is not None:
             on_stage(JobStage(key=key, label=label, index=index, total=total))
 
-    def progress(fraction: float | None, unit: int) -> None:
+    def progress(fraction: float | None, base: float, span: float) -> None:
+        """Report ``fraction`` of a phase holding ``span`` weight after ``base``."""
         if on_progress is None:
             return
         if fraction is None:
             on_progress(None)
             return
-        overall = (unit + min(max(fraction, 0.0), 1.0)) / total_units
-        on_progress(min(max(overall, 0.0), 1.0))
+        done = base + span * min(max(fraction, 0.0), 1.0)
+        on_progress(min(max(measurable * done / total_weight, 0.0), 1.0))
 
     def check_cancel(stage: str) -> None:
         if runner.cancelled:
@@ -396,23 +414,30 @@ def execute_plan(
         for index, step in enumerate(plan.prep_steps):
             check_cancel("preparing tracks")
             announce("prepare", step.label, index, len(plan.prep_steps))
-            progress(0.0, index)
+            base = index * PREP_STEP_WEIGHT
+            progress(0.0, base, PREP_STEP_WEIGHT)
             run_prep_step(
                 plan,
                 step,
                 runner,
                 ffprobe=ffprobe,
                 on_line=on_line,
-                on_progress=lambda value, unit=index: progress(value, unit),
+                on_progress=lambda value, base=base: progress(
+                    value, base, PREP_STEP_WEIGHT
+                ),
             )
-            progress(1.0, index)
+            progress(1.0, base, PREP_STEP_WEIGHT)
 
         check_cancel("muxing")
         announce("mux", f"muxing {plan.source.name}")
-        progress(0.0, len(plan.prep_steps))
-        mux_result = run_mux(plan, runner, on_line=on_line,
-                             on_progress=lambda value: progress(value, len(plan.prep_steps)))
-        progress(1.0, len(plan.prep_steps))
+        progress(0.0, prep_weight, MUX_WEIGHT)
+        mux_result = run_mux(
+            plan,
+            runner,
+            on_line=on_line,
+            on_progress=lambda value: progress(value, prep_weight, MUX_WEIGHT),
+        )
+        progress(1.0, prep_weight, MUX_WEIGHT)
 
         # Convert before verifying, so the checks inspect exactly what ships: a
         # PS3 only mounts the FAT32 flavour from USB (docs/CONTEXT.md §2.11).
@@ -671,11 +696,14 @@ __all__ = [
     "BDMV_DIR",
     "EXPECTED_TOP_LEVEL",
     "FAT32_MAX_BYTES",
+    "MUX_WEIGHT",
+    "PREP_STEP_WEIGHT",
     "REQUIRED_BDMV_DIRS",
     "REQUIRED_BDMV_FILES",
     "SPLIT_MB_BYTES",
     "SPLIT_OVERSHOOT_ALLOWANCE",
     "STREAM_DIR",
+    "TAIL_SHARE",
     "USB_FILE_RENAMES",
     "USB_SUFFIX_RENAMES",
     "JobOutcome",

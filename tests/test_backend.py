@@ -16,8 +16,11 @@ import pytest
 
 from avchdforge.backend import (
     FAT32_MAX_BYTES,
+    MUX_WEIGHT,
+    PREP_STEP_WEIGHT,
     SPLIT_MB_BYTES,
     SPLIT_OVERSHOOT_ALLOWANCE,
+    TAIL_SHARE,
     JobOutcome,
     JobStage,
     check_output_tree,
@@ -703,8 +706,43 @@ def test_execute_plan_progress_covers_prep_and_mux(tmp_path: Path, runner) -> No
     assert values == sorted(values)
     assert values[0] == 0.0
     assert values[-1] == 1.0
-    # the ffmpeg block at 8s of an 8s source filled its third of the bar
-    assert any(abs(value - 1 / 3) < 1e-6 for value in values)
+    # the ffmpeg block at 8s of an 8s source filled its slice of the bar
+    slice_end = (1 - TAIL_SHARE) * PREP_STEP_WEIGHT / (PREP_STEP_WEIGHT + MUX_WEIGHT)
+    assert any(abs(value - slice_end) < 1e-6 for value in values)
+
+
+def test_execute_plan_progress_is_nearly_full_when_the_mux_ends(
+    tmp_path: Path, runner
+) -> None:
+    """The tail after the mux is a sliver, so the mux must end near the top.
+
+    Regression test: the verification phase used to hold a whole unit of the
+    bar, so with ``n`` prep steps the mux ended at ``(n + 1) / (n + 2)`` — 80%
+    with three — and the flush, rename and verification jumped the bar from
+    there to 100% only once the whole job was done.
+    """
+    plan = dts_hd_plan(tmp_path)
+    fake_tree(plan.output_dir)
+    runner.add(FakeResponse(match="dca_core", stdout="progress=end\n"))
+    runner.add_json(output_payload(astream(0, codec="dts")), match="dtscore")
+    mux_json_runner(
+        runner,
+        [
+            vstream(0),
+            astream(1, codec="dts", profile="DTS", channels=6),
+            sstream(2, "hdmv_pgs_subtitle"),
+        ],
+    )
+    progress: list[float | None] = []
+
+    execute_plan(plan, runner, on_progress=progress.append)
+
+    values = [value for value in progress if value is not None]
+    # the run ends with the mux's last value, the busy ``None`` while
+    # verification probes the output, then 1.0:
+    assert values[-2] == pytest.approx(1 - TAIL_SHARE)
+    assert values[-1] == 1.0
+    assert None in progress
 
 
 def test_execute_plan_does_not_touch_foreign_files(tmp_path: Path, runner) -> None:
