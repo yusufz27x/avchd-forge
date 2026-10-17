@@ -37,6 +37,7 @@ def test_build_ffprobe_argv_is_exactly_as_documented():
         "json",
         "-show_format",
         "-show_streams",
+        "-show_data",
         "/media/My Movie.mkv",
     ]
 
@@ -181,6 +182,59 @@ def test_parse_transport_stream_fixture():
     assert dts.codec == "dts"
     assert dts.channels == 6
     assert dts.is_hd is False, "a plain DTS core track is not HD"
+
+
+# --------------------------------------------------------------------------
+# SPS geometry from the extradata hexdump
+# --------------------------------------------------------------------------
+
+
+def test_window_cropped_fixture_carries_the_sps_geometry():
+    media = parse_ffprobe_json(load_json("mkv_window_crop_h264_ac3_srt.json"))
+
+    video = media.video
+    assert video is not None
+    assert video.resolution == (1920, 1036), "ffprobe reports the displayed size"
+    assert video.sps is not None, "the extradata hexdump must be parsed"
+    assert video.coded_resolution == (1920, 1088)
+    assert video.sps.display == (1920, 1036)
+
+    restore = video.restore_window()
+    assert restore is not None
+    assert restore.target == (1920, 1080)
+    assert restore.crop_bottom == 8
+    assert restore.exposed_rows == ((0, 26), (1062, 1080))
+    assert video.output_resolution == (1920, 1080)
+
+
+def test_video_without_extradata_has_no_geometry_to_repair():
+    media = parse_ffprobe_json(load_json("mkv_1080p_h264_ac3x2_srt.json"))
+
+    video = media.video
+    assert video is not None
+    assert video.sps is None
+    assert video.coded_resolution == video.resolution
+    assert video.restore_window() is None
+    assert video.output_resolution == video.resolution
+
+
+def test_unreadable_extradata_is_ignored_not_fatal():
+    payload = {
+        "streams": [
+            {
+                "index": 0,
+                "codec_type": "video",
+                "codec_name": "h264",
+                "width": 1920,
+                "height": 1080,
+                "extradata": "not a hexdump",
+            }
+        ],
+        "format": {},
+    }
+    media = parse_ffprobe_json(payload)
+    assert media.video is not None
+    assert media.video.sps is None
 
 
 # --------------------------------------------------------------------------

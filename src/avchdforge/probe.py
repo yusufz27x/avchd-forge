@@ -32,6 +32,7 @@ from .constants import (
 )
 from .errors import ProbeError
 from .process import Runner
+from .sps import SpsGeometry, WindowRestore, geometry_from_hex_dump, window_restore
 
 # --------------------------------------------------------------------------
 # Small parsers
@@ -149,10 +150,42 @@ class VideoTrack:
     field_order: str | None = None
     duration: float | None = None
     language: str = DEFAULT_LANGUAGE
+    #: Coded frame + conformance window, read from the SPS when ffprobe's
+    #: ``extradata`` carried it. ``None`` when that was not possible.
+    sps: SpsGeometry | None = None
 
     @property
     def resolution(self) -> tuple[int | None, int | None]:
         return (self.width, self.height)
+
+    @property
+    def coded_resolution(self) -> tuple[int | None, int | None]:
+        """The coded frame size (SPS) when known — the display size otherwise.
+
+        Containers report the display size; the SPS is the only place the coded
+        size (and with it what a window repair can reach) is written down.
+        """
+        if self.sps is not None:
+            return self.sps.coded
+        return self.resolution
+
+    def restore_window(self) -> WindowRestore | None:
+        """The lossless conformance-window repair for this stream, if any.
+
+        Non-``None`` only when the coded frame is at least as large as a legal
+        AVCHD target and the window hides rows that are actually coded.
+        """
+        if self.sps is None or not self.is_avc:
+            return None
+        return window_restore(self.sps)
+
+    @property
+    def output_resolution(self) -> tuple[int | None, int | None]:
+        """What the finished disc will show once the mux ran."""
+        restore = self.restore_window()
+        if restore is not None:
+            return restore.target
+        return self.resolution
 
     @property
     def is_avc(self) -> bool:
@@ -363,7 +396,13 @@ class MediaInfo:
 # --------------------------------------------------------------------------
 
 def build_ffprobe_argv(tool: str, path: Path | str) -> list[str]:
-    """argv for a JSON probe of ``path``. Pure function, asserted by tests."""
+    """argv for a JSON probe of ``path``. Pure function, asserted by tests.
+
+    ``-show_data`` adds the stream ``extradata`` hexdump, which is where the
+    SPS lives: the coded frame size and the conformance window are not in any
+    ffprobe field (``coded_width`` mirrors the display size in Matroska and
+    MPEG-TS), and the window repair needs both (``docs/CONTEXT.md`` §2.12).
+    """
     return [
         str(tool),
         "-hide_banner",
@@ -373,6 +412,7 @@ def build_ffprobe_argv(tool: str, path: Path | str) -> list[str]:
         "json",
         "-show_format",
         "-show_streams",
+        "-show_data",
         str(path),
     ]
 
@@ -408,6 +448,7 @@ def parse_ffprobe_json(payload: Mapping[str, Any], path: Path | str | None = Non
             # Cover art and thumbnails show up as video streams with disposition.attached_pic.
             if _is_truthy(_disposition(stream).get("attached_pic")):
                 continue
+            dump = stream.get("extradata")
             videos.append(
                 VideoTrack(
                     index=index,
@@ -423,6 +464,11 @@ def parse_ffprobe_json(payload: Mapping[str, Any], path: Path | str | None = Non
                     field_order=_optional_str(stream.get("field_order")),
                     duration=parse_float(stream.get("duration")),
                     language=_language_of(stream),
+                    sps=(
+                        geometry_from_hex_dump(str(dump))
+                        if isinstance(dump, str) and dump.strip()
+                        else None
+                    ),
                 )
             )
         elif kind == "audio":
