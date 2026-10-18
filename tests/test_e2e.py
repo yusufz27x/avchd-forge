@@ -17,7 +17,10 @@ What only these tests can prove, with the tools actually installed:
 * the composition check reads a real stream part and finds the video still
   H.264 at 1920x1080, both AC-3 tracks as AC-3 (6ch + 2ch), and the SubRip
   track converted to PGS;
-* ``--split-size`` really writes several parts, none above the limit.
+* ``--split-size`` really writes several parts, none above the limit;
+* two real muxes merge into one tree whose title table libbluray's HDMV VM
+  obeys: disc insert plays episode 1, "Go To -> Title 2" plays episode 2
+  (:mod:`tests.libbluray`; skipped when libbluray is not installed).
 
 Tools are located exactly like the application does: ``$AVCHD_FORGE_*``
 overrides first, then ``PATH``, then the usual install directories (note that
@@ -36,12 +39,18 @@ from avchdforge.backend import (
     SPLIT_OVERSHOOT_ALLOWANCE,
     JobOutcome,
     execute_plan,
+    run_mux,
+    run_prep_step,
 )
+from avchdforge.bdmv import parse_index, parse_movie_objects, play_playlist
 from avchdforge.plan import PlanOptions, plan_for_source
 from avchdforge.probe import probe
 from avchdforge.process import SubprocessRunner
+from avchdforge.season import merge_avchd_trees
 from avchdforge.selection import TrackSelection
 from avchdforge.tooling import locate_tool
+
+from .libbluray import open_disc, starts_with_clip
 
 pytestmark = pytest.mark.e2e
 
@@ -263,3 +272,98 @@ def test_small_split_size_produces_multiple_parts_within_the_limit(
     media = probe(parts[0], SubprocessRunner(), tool=str(tools["ffprobe"]))
     assert media.video is not None and media.video.codec == "h264"
     assert [track.codec for track in media.audio] == ["ac3", "ac3"]
+
+
+# --------------------------------------------------------------------------
+# season: two episodes, one tree, obeyed by libbluray's HDMV VM
+# --------------------------------------------------------------------------
+
+
+def _mux_episode(
+    source: Path, tools: dict[str, Path], output_dir: Path, temp_dir: Path
+) -> Path:
+    """Mux one episode without the USB rename, the way the season merge needs it.
+
+    ``execute_plan`` ends by renaming the tree to the AVCHD-on-FAT32 names; a
+    season merge renumbers whole trees instead and renames once, afterwards, so
+    this helper stops right before that step. Prep steps still run — the
+    window-repaired episode needs one.
+    """
+    runner = SubprocessRunner()
+    media = probe(source, runner, tool=str(tools["ffprobe"]))
+    selection = TrackSelection(audio=tuple(track.index for track in media.audio))
+    plan = plan_for_source(
+        source,
+        runner,
+        output_dir=output_dir,
+        temp_dir=temp_dir,
+        selection=selection,
+        options=PlanOptions(tsmuxer=str(tools["tsMuxeR"]), ffmpeg=str(tools["ffmpeg"])),
+        ffprobe=str(tools["ffprobe"]),
+    )
+    plan.temp_dir.mkdir(parents=True, exist_ok=True)
+    for step in plan.prep_steps:
+        run_prep_step(plan, step, runner, ffprobe=str(tools["ffprobe"]))
+    run_mux(plan, runner)
+    return plan.output_dir
+
+
+@pytest.fixture(scope="session")
+def season_tree(tools: dict[str, Path], sample: Path, window_sample: Path, tmp_path_factory):
+    """Two real muxes merged into one tree: the shape the season support ships."""
+    work = tmp_path_factory.mktemp("e2e-season")
+    sources = [
+        _mux_episode(sample, tools, work / "episode1", work / "tmp1"),
+        _mux_episode(window_sample, tools, work / "episode2", work / "tmp2"),
+    ]
+    merged = merge_avchd_trees(sources, work / "season" / "AVCHD")
+    assert merged.playlists == (0, 1)
+    return merged.root
+
+
+def test_merged_season_tree_holds_one_title_per_episode(season_tree: Path) -> None:
+    bdmv = season_tree / "BDMV"
+    assert sorted(path.name for path in (bdmv / "STREAM").iterdir()) == [
+        "00000.m2ts",
+        "00001.m2ts",
+    ]
+
+    index = parse_index((bdmv / "index.bdmv").read_bytes())
+    assert [title.id_ref for title in index.titles] == [0, 1]
+    assert index.top_menu.id_ref == 2
+    assert index.first_play.id_ref == 3
+
+    objects = parse_movie_objects((bdmv / "MovieObject.bdmv").read_bytes())
+    assert len(objects) == 4
+    assert objects[0].commands[3] == play_playlist(0)
+    assert objects[1].commands[3] == play_playlist(1)
+
+    # the second episode's playlist was renumbered: its clip reference moved
+    second = (bdmv / "PLAYLIST/00001.mpls").read_bytes()
+    assert b"00001M2TS" in second
+    assert b"00000M2TS" not in second
+
+    # BACKUP carries the same rebuilt navigation
+    assert (bdmv / "BACKUP/MovieObject.bdmv").read_bytes() == (
+        bdmv / "MovieObject.bdmv"
+    ).read_bytes()
+    assert (bdmv / "BACKUP/index.bdmv").read_bytes() == (bdmv / "index.bdmv").read_bytes()
+
+
+def test_libbluray_plays_episode_1_on_insert_and_episode_2_via_title_search(
+    season_tree: Path,
+) -> None:
+    """libbluray runs the real HDMV VM: insert, then Go To -> Title 2."""
+    try:
+        disc = open_disc(season_tree)
+    except OSError as exc:
+        pytest.skip(str(exc))
+    with disc:
+        assert disc.play(), "disc insert must start the FirstPlay object"
+        assert starts_with_clip(disc.read(), season_tree / "BDMV/STREAM/00000.m2ts"), (
+            "inserting the disc must play episode 1 (title 1)"
+        )
+        assert disc.play_title(2), "title 2 must be selectable"
+        assert starts_with_clip(disc.read(), season_tree / "BDMV/STREAM/00001.m2ts"), (
+            "'Go To -> Title 2' must play episode 2"
+        )
