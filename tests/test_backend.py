@@ -9,6 +9,8 @@ phantom 0-channel AC-3 stream, a missing success sentinel — because that is wh
 
 from __future__ import annotations
 
+import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -23,15 +25,17 @@ from avchdforge.backend import (
     TAIL_SHARE,
     JobOutcome,
     JobStage,
+    SeasonOutcome,
     check_output_tree,
     check_stream_composition,
     execute_plan,
+    execute_season,
     find_streams,
     rename_tree_for_usb,
     run_mux,
     verify_output,
 )
-from avchdforge.errors import JobCancelled, MuxError, VerificationError
+from avchdforge.errors import JobCancelled, MuxError, SeasonMergeError, VerificationError
 from avchdforge.plan import JobPlan, PlanOptions, build_plan
 from avchdforge.probe import parse_ffprobe_json
 from avchdforge.selection import TrackSelection
@@ -807,3 +811,228 @@ def test_execute_plan_keeps_temp_dir_when_check_fails(tmp_path: Path, runner) ->
         execute_plan(plan, runner)
 
     assert plan.temp_dir.is_dir()
+
+
+# --------------------------------------------------------------------------
+# execute_season — several episodes in one AVCHD folder
+# --------------------------------------------------------------------------
+
+
+def season_episode_tree(output_dir: Path, *, parts: int = 1) -> Path:
+    """tsMuxeR's single-title layout, including the BACKUP tree a merge insists on."""
+    bdmv = output_dir / "BDMV"
+    for name in ("PLAYLIST", "CLIPINF", "STREAM", "BACKUP/PLAYLIST", "BACKUP/CLIPINF"):
+        (bdmv / name).mkdir(parents=True, exist_ok=True)
+    for base in (bdmv, bdmv / "BACKUP"):
+        (base / "index.bdmv").write_bytes(b"IDX0200")
+        (base / "MovieObject.bdmv").write_bytes(b"MOBJ0200")
+    playlist = b"MPLS0200" + b"\x00" * 0x3C
+    playlist += b"".join(b"\x00\x50" + f"{stem:05d}M2TS".encode("ascii") for stem in range(parts))
+    for path in (bdmv / "PLAYLIST/00000.mpls", bdmv / "BACKUP/PLAYLIST/00000.mpls"):
+        path.write_bytes(playlist)
+    for stem in range(parts):
+        name = f"{stem:05d}"
+        for base in (bdmv, bdmv / "BACKUP"):
+            (base / "CLIPINF" / f"{name}.clpi").write_bytes(b"HDMV0200")
+        (bdmv / "STREAM" / f"{name}.m2ts").write_bytes(b"\x00" * 4096)
+    return bdmv / "STREAM/00000.m2ts"
+
+
+def season_plan(tmp_path: Path, number: int, *, parts: int = 1) -> JobPlan:
+    """One episode staged the way ``jobs.py`` stages a season run."""
+    media = build_media(
+        [vstream(0), astream(1), sstream(3)], path=f"episode{number}.mkv"
+    )
+    episode_dir = tmp_path / "season-tmp" / f"episode-{number:02d}"
+    return build_plan(
+        media,
+        TrackSelection(audio=(1,), subtitles=(3,)),
+        AC3_DETECTION,
+        output_dir=episode_dir,
+        temp_dir=episode_dir,
+        options=PlanOptions().with_split_size(None),
+    )
+
+
+def script_season(
+    runner: FakeRunner,
+    *,
+    parts: tuple[int, ...] = (1, 1),
+    streams: Sequence[list[dict[str, Any]]] | None = None,
+) -> None:
+    """Script one mux plus one output probe per episode, in episode order.
+
+    ``streams`` (one stream list per episode) overrides what the probes report;
+    by default every probe reports the layout the passthrough plan asks for.
+    """
+    for index, count in enumerate(parts):
+        runner.add(
+            FakeResponse(
+                stdout=MUX_OK,
+                match="tsmuxer-meta.txt",
+                side_effect=lambda argv, count=count: season_episode_tree(
+                    Path(argv[-1]), parts=count
+                ),
+            )
+        )
+        probe_streams = streams[index] if streams is not None else default_output_streams()
+        runner.add_stdout(json.dumps(output_payload(*probe_streams)), match=".m2ts")
+
+
+def test_execute_season_muxes_each_episode_and_merges_the_trees(tmp_path: Path) -> None:
+    plans = [season_plan(tmp_path, 1), season_plan(tmp_path, 2)]
+    staging = tmp_path / "season-tmp"
+    destination = tmp_path / "out" / "AVCHD"
+    runner = FakeRunner()
+    script_season(runner)
+    stages: list[JobStage] = []
+    progress: list[float | None] = []
+
+    outcome = execute_season(
+        plans,
+        runner,
+        destination=destination,
+        on_stage=stages.append,
+        on_progress=progress.append,
+        owns_temp=True,
+    )
+
+    assert isinstance(outcome, SeasonOutcome)
+    assert outcome.title_count == 2
+    assert outcome.playlists == (0, 1)
+    assert outcome.root == destination
+    assert outcome.temp_dir == staging
+    # One title per episode, one clip each, in the FAT32 names a PS3 mounts.
+    bdmv = destination / "BDMV"
+    assert (bdmv / "INDEX.BDM").is_file()
+    assert (bdmv / "PLAYLIST/00001.MPL").is_file()
+    assert (bdmv / "BACKUP/PLAYLIST/00001.MPL").is_file()
+    assert [path.name for path in outcome.stream_files] == ["00000.MTS", "00001.MTS"]
+    # Both episodes were muxed and probed in order, then the staging root went away.
+    assert [Path(call[0]).name for call in runner.calls] == [
+        "tsMuxeR",
+        "ffprobe",
+        "tsMuxeR",
+        "ffprobe",
+    ]
+    assert [stage.key for stage in stages] == [
+        "mux",
+        "verify",
+        "mux",
+        "verify",
+        "merge",
+        "verify",
+        "cleanup",
+    ]
+    mux_labels = [stage.label for stage in stages if stage.key == "mux"]
+    assert mux_labels == [
+        "episode 1/2: muxing episode1.mkv",
+        "episode 2/2: muxing episode2.mkv",
+    ]
+    assert not staging.exists()
+    values = [value for value in progress if value is not None]
+    assert values == sorted(values)
+    assert values[0] == 0.0
+    assert values[-1] == 1.0
+    assert None in progress  # the probes and the merge tail show a busy bar
+
+
+def test_execute_season_merges_multi_part_episodes(tmp_path: Path) -> None:
+    """The realistic case: an episode over the split size muxes into several clips."""
+    plans = [season_plan(tmp_path, 1, parts=2), season_plan(tmp_path, 2, parts=1)]
+    runner = FakeRunner()
+    script_season(runner, parts=(2, 1))
+
+    outcome = execute_season(
+        plans, runner, destination=tmp_path / "out" / "AVCHD", owns_temp=True
+    )
+
+    assert outcome.playlists == (0, 2)
+    assert [path.name for path in outcome.stream_files] == [
+        "00000.MTS",
+        "00001.MTS",
+        "00002.MTS",
+    ]
+
+
+def test_execute_season_refuses_an_episode_with_a_dropped_track(tmp_path: Path) -> None:
+    plans = [season_plan(tmp_path, 1), season_plan(tmp_path, 2)]
+    destination = tmp_path / "out" / "AVCHD"
+    runner = FakeRunner()
+    script_season(
+        runner,
+        streams=[default_output_streams(), [vstream(0), astream(1)]],  # no subtitle
+    )
+
+    with pytest.raises(VerificationError, match="subtitle streams"):
+        execute_season(plans, runner, destination=destination, owns_temp=True)
+
+    # Episode 1 was staged, but nothing was merged into the destination.
+    assert not (destination / "BDMV").exists()
+    assert (plans[0].output_dir / "BDMV/index.bdmv").is_file()
+    assert (plans[1].output_dir / "BDMV/index.bdmv").is_file()
+
+
+def test_execute_season_cancellation_keeps_the_staged_trees(tmp_path: Path) -> None:
+    plans = [season_plan(tmp_path, 1), season_plan(tmp_path, 2)]
+    runner = FakeRunner()
+
+    def mux_and_cancel(argv: list[str]) -> None:
+        season_episode_tree(Path(argv[-1]))
+        runner.cancelled = True
+
+    runner.add(FakeResponse(stdout=MUX_OK, match="tsmuxer-meta.txt", side_effect=mux_and_cancel))
+    destination = tmp_path / "out" / "AVCHD"
+
+    with pytest.raises(JobCancelled) as excinfo:
+        execute_season(plans, runner, destination=destination, owns_temp=True)
+
+    assert excinfo.value.stage == "episode 1/2: verifying"
+    assert not (destination / "BDMV").exists()
+    assert (plans[0].output_dir / "BDMV/STREAM/00000.m2ts").is_file()
+
+
+def test_execute_season_can_keep_the_staged_trees(tmp_path: Path) -> None:
+    """Keeping the temp means keeping the muxed trees, so the merge copies."""
+    plans = [season_plan(tmp_path, 1), season_plan(tmp_path, 2)]
+    runner = FakeRunner()
+    script_season(runner)
+
+    outcome = execute_season(
+        plans,
+        runner,
+        destination=tmp_path / "out" / "AVCHD",
+        owns_temp=True,
+        keep_temp_on_success=True,
+    )
+
+    assert outcome.temp_dir_kept
+    assert (plans[0].output_dir / "BDMV/STREAM/00000.m2ts").is_file()
+    assert (plans[1].output_dir / "BDMV/STREAM/00000.m2ts").is_file()
+    assert (outcome.root / "BDMV/INDEX.BDM").is_file()
+
+
+def test_execute_season_leaves_a_shared_staging_root_alone(tmp_path: Path) -> None:
+    """A pre-existing staging root is the caller's; only this run's files go away."""
+    plans = [season_plan(tmp_path, 1), season_plan(tmp_path, 2)]
+    staging = tmp_path / "season-tmp"
+    staging.mkdir(parents=True)
+    foreign = staging / "keep-me.txt"
+    foreign.write_text("not ours")
+    runner = FakeRunner()
+    script_season(runner)
+
+    execute_season(
+        plans, runner, destination=tmp_path / "out" / "AVCHD", owns_temp=False
+    )
+
+    assert foreign.exists()
+    assert not plans[0].output_dir.exists()
+    assert not plans[0].meta_path.exists()
+
+
+def test_execute_season_refuses_plans_that_are_not_staged(tmp_path: Path) -> None:
+    """A plan whose mux destination is not <scratch>/AVCHD cannot become a title."""
+    plan = ac3_plan(tmp_path)  # output <tmp>/out/AVCHD, scratch <tmp>/tmp
+    with pytest.raises(SeasonMergeError, match="season muxes into"):
+        execute_season([plan], FakeRunner(), destination=tmp_path / "season")

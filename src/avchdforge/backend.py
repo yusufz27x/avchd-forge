@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import os
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
@@ -27,18 +27,20 @@ from .errors import (
     MuxError,
     PrepError,
     ProbeError,
+    SeasonMergeError,
     VerificationError,
 )
-from .plan import JobPlan, PlannedTrack
+from .plan import AVCHD_DIR_NAME, JobPlan, PlannedTrack
 from .prep import PrepStep, check_prep_output
 from .probe import AudioTrack, MediaInfo, SubtitleTrack, VideoTrack, probe
 from .process import CompletedRun, LineCallback, ProgressCallback, Runner
 from .progress import FfmpegProgressScanner, TsmuxerScanner, is_mux_success
+from .season import merge_avchd_trees
 from .tracks import codec_family
 
 #: Stages a job passes through. ``probe`` and ``plan`` are emitted by the Qt job
 #: layer (``jobs.py``) before this module starts working; the rest come from here.
-StageKey = Literal["probe", "plan", "prepare", "mux", "verify", "cleanup"]
+StageKey = Literal["probe", "plan", "prepare", "mux", "verify", "merge", "cleanup"]
 StageCallback = Callable[["JobStage"], None]
 
 #: The AVCHD tree tsMuxeR's ``--avchd`` mode writes (``docs/CONTEXT.md`` §2.1).
@@ -136,6 +138,46 @@ class JobOutcome:
     details: tuple[str, ...] = ()
     #: True when the temp directory was deliberately left in place.
     temp_dir_kept: bool = False
+
+    @property
+    def output_dir(self) -> Path:
+        """The ``AVCHD`` folder the tree was written into."""
+        return self.plan.output_dir
+
+    @property
+    def temp_dir(self) -> Path:
+        return self.plan.temp_dir
+
+
+@dataclass(frozen=True, slots=True)
+class SeasonOutcome:
+    """A finished, verified season: one title per episode in one tree.
+
+    ``plans[i]``'s tree became title ``i + 1`` and runs ``playlists[i]``
+    (:class:`avchdforge.season.MergedSeason`). ``verified_file`` has no season
+    counterpart: every episode's own tree was probed before the merge and the
+    merged tree was checked file by file after it.
+    """
+
+    plans: tuple[JobPlan, ...]
+    #: The merged ``AVCHD`` folder, ready for the drive.
+    root: Path
+    playlists: tuple[int, ...]
+    stream_files: tuple[Path, ...]
+    mux_outputs: tuple[str, ...]
+    warnings: tuple[str, ...] = ()
+    details: tuple[str, ...] = ()
+    #: The directory the episode trees were staged in (one subdirectory each).
+    temp_dir: Path | None = None
+    temp_dir_kept: bool = False
+
+    @property
+    def title_count(self) -> int:
+        return len(self.plans)
+
+    @property
+    def output_dir(self) -> Path:
+        return self.root
 
 
 # --------------------------------------------------------------------------
@@ -355,6 +397,114 @@ MUX_WEIGHT: Final[float] = 2.0
 #: a unit of its own the mux ended at ``(steps + 1) / (steps + 2)`` of the bar
 #: — 80% with three prep steps — and everything after it jumped to 100%.
 TAIL_SHARE: Final[float] = 0.02
+#: Run-bar weight of a season's merge: it hands the whole season to the
+#: destination once — a copy, or a rename per file when both sides share a
+#: filesystem — so one unit of the bar is the right price for it.
+MERGE_WEIGHT: Final[float] = MUX_WEIGHT
+
+
+class _RunBar:
+    """One run's progress arithmetic: phase fractions onto a single 0..1 bar.
+
+    Every phase declares the weight of the data it moves (the constants above);
+    ``total_weight`` is their sum. All but :data:`TAIL_SHARE` of the bar is
+    measurable, so the post-mux tail — the write-buffer flush, verification,
+    the AVCHD-on-FAT32 rename and cleanup — takes the last few percent whatever
+    the run did before. A ``None`` fraction means "working, not measurable" and
+    shows as a busy bar.
+    """
+
+    def __init__(
+        self,
+        total_weight: float,
+        *,
+        on_progress: ProgressCallback | None,
+        on_stage: StageCallback | None,
+    ) -> None:
+        self._total = total_weight
+        self._measurable = 1.0 - TAIL_SHARE
+        self._on_progress = on_progress
+        self._on_stage = on_stage
+
+    def announce(self, key: StageKey, label: str, index: int = 0, total: int = 1) -> None:
+        if self._on_stage is not None:
+            self._on_stage(JobStage(key=key, label=label, index=index, total=total))
+
+    def phase(self, fraction: float | None, base: float, span: float) -> None:
+        """Report ``fraction`` of a phase holding ``span`` weight after ``base``."""
+        if self._on_progress is None:
+            return
+        if fraction is None:
+            self._on_progress(None)
+            return
+        done = base + span * min(max(fraction, 0.0), 1.0)
+        self._on_progress(min(max(self._measurable * done / self._total, 0.0), 1.0))
+
+    def busy(self) -> None:
+        """Unmeasurable work is coming (a probe, a copy): show a busy bar."""
+        if self._on_progress is not None:
+            self._on_progress(None)
+
+    def done(self) -> None:
+        if self._on_progress is not None:
+            self._on_progress(1.0)
+
+
+def _mux_one(
+    plan: JobPlan,
+    runner: Runner,
+    *,
+    bar: _RunBar,
+    base: float,
+    weight: float,
+    ffprobe: str,
+    on_line: LineCallback | None,
+    prefix: str = "",
+) -> CompletedRun:
+    """Run one plan's preparation and mux inside the bar slice ``[base, base+weight]``.
+
+    The preparation steps and the mux read the same source once each, but the
+    mux also writes the output, hence the weights (:data:`PREP_STEP_WEIGHT`
+    against :data:`MUX_WEIGHT`). ``prefix`` labels the stage names for a season
+    — ``"episode 2/3: "`` — and stays empty for a single job.
+    """
+
+    def stage(text: str) -> str:
+        return f"{prefix}{text}"
+
+    prep_weight = len(plan.prep_steps) * PREP_STEP_WEIGHT
+    for index, step in enumerate(plan.prep_steps):
+        if runner.cancelled:
+            raise JobCancelled(stage("preparing tracks"))
+        bar.announce("prepare", stage(step.label), index, len(plan.prep_steps))
+        step_base = base + index * PREP_STEP_WEIGHT
+        bar.phase(0.0, step_base, PREP_STEP_WEIGHT)
+        run_prep_step(
+            plan,
+            step,
+            runner,
+            ffprobe=ffprobe,
+            on_line=on_line,
+            on_progress=lambda value, step_base=step_base: bar.phase(
+                value, step_base, PREP_STEP_WEIGHT
+            ),
+        )
+        bar.phase(1.0, step_base, PREP_STEP_WEIGHT)
+
+    if runner.cancelled:
+        raise JobCancelled(stage("muxing"))
+    bar.announce("mux", stage(f"muxing {plan.source.name}"))
+    mux_base = base + prep_weight
+    mux_weight = weight - prep_weight
+    bar.phase(0.0, mux_base, mux_weight)
+    mux_result = run_mux(
+        plan,
+        runner,
+        on_line=on_line,
+        on_progress=lambda value: bar.phase(value, mux_base, mux_weight),
+    )
+    bar.phase(1.0, mux_base, mux_weight)
+    return mux_result
 
 
 def execute_plan(
@@ -390,54 +540,23 @@ def execute_plan(
     # every prep step and the mux share everything but TAIL_SHARE.
     prep_weight = len(plan.prep_steps) * PREP_STEP_WEIGHT
     total_weight = prep_weight + MUX_WEIGHT
-    measurable = 1.0 - TAIL_SHARE
-
-    def announce(key: StageKey, label: str, index: int = 0, total: int = 1) -> None:
-        if on_stage is not None:
-            on_stage(JobStage(key=key, label=label, index=index, total=total))
-
-    def progress(fraction: float | None, base: float, span: float) -> None:
-        """Report ``fraction`` of a phase holding ``span`` weight after ``base``."""
-        if on_progress is None:
-            return
-        if fraction is None:
-            on_progress(None)
-            return
-        done = base + span * min(max(fraction, 0.0), 1.0)
-        on_progress(min(max(measurable * done / total_weight, 0.0), 1.0))
+    bar = _RunBar(total_weight, on_progress=on_progress, on_stage=on_stage)
+    announce = bar.announce
 
     def check_cancel(stage: str) -> None:
         if runner.cancelled:
             raise JobCancelled(stage)
 
     try:
-        for index, step in enumerate(plan.prep_steps):
-            check_cancel("preparing tracks")
-            announce("prepare", step.label, index, len(plan.prep_steps))
-            base = index * PREP_STEP_WEIGHT
-            progress(0.0, base, PREP_STEP_WEIGHT)
-            run_prep_step(
-                plan,
-                step,
-                runner,
-                ffprobe=ffprobe,
-                on_line=on_line,
-                on_progress=lambda value, base=base: progress(
-                    value, base, PREP_STEP_WEIGHT
-                ),
-            )
-            progress(1.0, base, PREP_STEP_WEIGHT)
-
-        check_cancel("muxing")
-        announce("mux", f"muxing {plan.source.name}")
-        progress(0.0, prep_weight, MUX_WEIGHT)
-        mux_result = run_mux(
+        mux_result = _mux_one(
             plan,
             runner,
+            bar=bar,
+            base=0.0,
+            weight=total_weight,
+            ffprobe=ffprobe,
             on_line=on_line,
-            on_progress=lambda value: progress(value, prep_weight, MUX_WEIGHT),
         )
-        progress(1.0, prep_weight, MUX_WEIGHT)
 
         # Convert before verifying, so the checks inspect exactly what ships: a
         # PS3 only mounts the FAT32 flavour from USB (docs/CONTEXT.md §2.11).
@@ -450,8 +569,7 @@ def execute_plan(
 
         check_cancel("verifying")
         announce("verify", "verifying the AVCHD structure")
-        if on_progress is not None:
-            on_progress(None)  # probe work is not measurable, show a busy bar
+        bar.busy()  # probe work is not measurable, show a busy bar
         report = _verification_report(plan, runner, mux_result, ffprobe=ffprobe, on_line=on_line)
         if not report.ok:
             raise VerificationError(report.problems, plan.output_dir)
@@ -460,8 +578,7 @@ def execute_plan(
         if not temp_kept:
             announce("cleanup", "cleaning up")
             _clean_temp(plan, owned=temp_owned)
-        if on_progress is not None:
-            on_progress(1.0)
+        bar.done()
 
         return JobOutcome(
             plan=plan,
@@ -480,6 +597,183 @@ def execute_plan(
         if not keep_temp_on_failure:
             _clean_temp(plan, owned=temp_owned)
         raise
+
+
+def execute_season(
+    plans: Sequence[JobPlan],
+    runner: Runner,
+    *,
+    destination: Path | str,
+    ffprobe: str = "ffprobe",
+    on_line: LineCallback | None = None,
+    on_progress: ProgressCallback | None = None,
+    on_stage: StageCallback | None = None,
+    keep_temp_on_success: bool = False,
+    keep_temp_on_failure: bool = True,
+    owns_temp: bool | None = None,
+) -> SeasonOutcome:
+    """Mux every episode and merge the trees into one AVCHD folder.
+
+    Each plan must be staged for a season run: its mux destination is a scratch
+    folder of its own, ``plan.temp_dir/AVCHD`` (what a plan built with
+    ``output_dir=plan.temp_dir`` produces), and every episode's scratch folder
+    must share one parent — the staging root, which is what ``owns_temp`` and
+    the temp policy apply to. The merged tree lands in ``destination``, which
+    must be empty or missing.
+
+    Every episode is muxed and verified on its own tree first (tsMuxeR's output
+    is checked before anything is merged, so a bad episode cannot poison a
+    season), then the trees are handed to
+    :func:`avchdforge.season.merge_avchd_trees`, renamed to the AVCHD-on-FAT32
+    names and checked as one tree. ``move`` is implied unless the caller asked
+    for the temp directory to survive — keeping the temp means keeping the
+    staged trees, so the merge copies in that case.
+
+    Cancellation and failure semantics match :func:`execute_plan`: a cancelled
+    or failed season keeps its staging root by default (the episode trees are
+    the evidence), and a successful one removes it unless
+    ``keep_temp_on_success`` says otherwise.
+    """
+    plans = tuple(plans)
+    if not plans:
+        raise SeasonMergeError("a season needs at least one episode plan")
+    root = Path(destination)
+    staging_root = Path(plans[0].temp_dir).parent
+    for number, plan in enumerate(plans, start=1):
+        if plan.output_dir != plan.temp_dir / AVCHD_DIR_NAME:
+            raise SeasonMergeError(
+                f"episode {number} ({plan.source.name}): a season muxes into "
+                f"<scratch>/AVCHD (got {plan.output_dir} for scratch {plan.temp_dir})"
+            )
+        if Path(plan.temp_dir).parent != staging_root:
+            raise SeasonMergeError(
+                f"episode {number} ({plan.source.name}): every episode's scratch "
+                f"folder must share one parent (got {plan.temp_dir})"
+            )
+    temp_owned = (not staging_root.exists()) if owns_temp is None else owns_temp
+    # Prep steps write into the scratch dir before the mux creates its output
+    # tree, exactly as in execute_plan; the caller may already have made it.
+    for plan in plans:
+        plan.temp_dir.mkdir(parents=True, exist_ok=True)
+
+    weights = [len(plan.prep_steps) * PREP_STEP_WEIGHT + MUX_WEIGHT for plan in plans]
+    bar = _RunBar(
+        sum(weights) + MERGE_WEIGHT, on_progress=on_progress, on_stage=on_stage
+    )
+    count = len(plans)
+    warnings: list[str] = []
+    details: list[str] = []
+    mux_outputs: list[str] = []
+
+    try:
+        base = 0.0
+        for index, (plan, weight) in enumerate(zip(plans, weights, strict=True), start=1):
+            prefix = f"episode {index}/{count}: "
+            mux_result = _mux_one(
+                plan,
+                runner,
+                bar=bar,
+                base=base,
+                weight=weight,
+                ffprobe=ffprobe,
+                on_line=on_line,
+                prefix=prefix,
+            )
+            mux_outputs.append(mux_result.output)
+            base += weight
+
+            # Verify the episode on its own staging tree, before the merge: the
+            # merge only renumbers names and playlist references (season.py), so
+            # a composition that held here holds in the merged tree.
+            if runner.cancelled:
+                raise JobCancelled(f"{prefix}verifying")
+            bar.announce("verify", f"{prefix}verifying the AVCHD structure")
+            bar.busy()
+            report = _verification_report(
+                plan, runner, mux_result, ffprobe=ffprobe, on_line=on_line
+            )
+            if not report.ok:
+                raise VerificationError(report.problems, plan.output_dir)
+            warnings.extend(report.warnings)
+            details.extend(report.details)
+
+        if runner.cancelled:
+            raise JobCancelled("merging the season")
+        bar.announce("merge", f"merging {count} episodes into one AVCHD folder")
+        bar.phase(0.0, base, MERGE_WEIGHT)
+        merged = merge_avchd_trees(
+            # Each episode's mux destination *is* a one-title tree: tsMuxeR
+            # writes BDMV/ directly into it.
+            [plan.output_dir for plan in plans],
+            root,
+            # A kept temp directory means the caller wants the staged trees to
+            # survive, so the merge has to copy instead of consuming them.
+            move=not keep_temp_on_success,
+            on_progress=lambda value: bar.phase(value, base, MERGE_WEIGHT),
+        )
+        bar.phase(1.0, base, MERGE_WEIGHT)
+
+        renamed = rename_tree_for_usb(root)
+        if renamed and on_line is not None:
+            on_line(
+                f"[avchd-forge] renamed {len(renamed)} files to the "
+                f"AVCHD-on-FAT32 (PS3 USB) names\n"
+            )
+
+        bar.announce("verify", "verifying the merged AVCHD structure")
+        bar.busy()
+        tree = check_output_tree(root, split_size_mb=_shared_split_size(plans))
+        if not tree.ok:
+            raise VerificationError(tree.problems, root)
+        warnings.extend(tree.warnings)
+        details.extend(tree.details)
+        if on_line is not None:
+            for detail in tree.details:
+                on_line(f"[avchd-forge] {detail}\n")
+            for warning in tree.warnings:
+                on_line(f"[avchd-forge] warning: {warning}\n")
+
+        temp_kept = keep_temp_on_success
+        if not temp_kept:
+            bar.announce("cleanup", "cleaning up")
+            _clean_season_temp(plans, staging_root, owned=temp_owned)
+        bar.done()
+
+        return SeasonOutcome(
+            plans=plans,
+            root=root,
+            playlists=merged.playlists,
+            stream_files=find_streams(root),
+            mux_outputs=tuple(mux_outputs),
+            warnings=tuple(warnings),
+            details=tuple(details),
+            temp_dir=staging_root,
+            temp_dir_kept=temp_kept,
+        )
+    except JobCancelled:
+        raise
+    except BaseException:
+        if not keep_temp_on_failure:
+            _clean_season_temp(plans, staging_root, owned=temp_owned)
+        raise
+
+
+def _shared_split_size(plans: Sequence[JobPlan]) -> int | None:
+    """The one split size every episode muxed with, or ``None`` when they differ."""
+    targets = {plan.mux.options.split_size_mb for plan in plans}
+    return targets.pop() if len(targets) == 1 else None
+
+
+def _clean_season_temp(
+    plans: Sequence[JobPlan], staging_root: Path, *, owned: bool
+) -> None:
+    """Drop a season's staged episode trees — the whole root, or only this run's files."""
+    if owned:
+        shutil.rmtree(staging_root, ignore_errors=True)
+        return
+    for plan in plans:
+        _clean_temp(plan, owned=False)
+        shutil.rmtree(plan.output_dir, ignore_errors=True)
 
 
 def run_prep_step(
@@ -698,6 +992,7 @@ __all__ = [
     "BDMV_DIR",
     "EXPECTED_TOP_LEVEL",
     "FAT32_MAX_BYTES",
+    "MERGE_WEIGHT",
     "MUX_WEIGHT",
     "PREP_STEP_WEIGHT",
     "REQUIRED_BDMV_DIRS",
@@ -710,12 +1005,14 @@ __all__ = [
     "USB_SUFFIX_RENAMES",
     "JobOutcome",
     "JobStage",
+    "SeasonOutcome",
     "StageCallback",
     "StageKey",
     "VerificationReport",
     "check_output_tree",
     "check_stream_composition",
     "execute_plan",
+    "execute_season",
     "find_streams",
     "rename_tree_for_usb",
     "run_mux",

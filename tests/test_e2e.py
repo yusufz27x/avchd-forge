@@ -18,9 +18,11 @@ What only these tests can prove, with the tools actually installed:
   H.264 at 1920x1080, both AC-3 tracks as AC-3 (6ch + 2ch), and the SubRip
   track converted to PGS;
 * ``--split-size`` really writes several parts, none above the limit;
-* two real muxes merge into one tree whose title table libbluray's HDMV VM
-  obeys: disc insert plays episode 1, "Go To -> Title 2" plays episode 2
-  (:mod:`tests.libbluray`; skipped when libbluray is not installed).
+* two real muxes run through the app's season path (``execute_season``) into
+  one tree whose title table libbluray's HDMV VM obeys: disc insert plays
+  episode 1, "Go To -> Title 2" plays episode 2 (:mod:`tests.libbluray`;
+  skipped when libbluray is not installed). The VM needs the optical names, so
+  it drives a copy of the renamed tree.
 
 Tools are located exactly like the application does: ``$AVCHD_FORGE_*``
 overrides first, then ``PATH``, then the usual install directories (note that
@@ -30,6 +32,7 @@ module skips with the search list instead of failing.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -37,16 +40,16 @@ import pytest
 from avchdforge.backend import (
     SPLIT_MB_BYTES,
     SPLIT_OVERSHOOT_ALLOWANCE,
+    USB_FILE_RENAMES,
+    USB_SUFFIX_RENAMES,
     JobOutcome,
     execute_plan,
-    run_mux,
-    run_prep_step,
+    execute_season,
 )
 from avchdforge.bdmv import parse_index, parse_movie_objects, play_playlist
 from avchdforge.plan import PlanOptions, plan_for_source
 from avchdforge.probe import probe
 from avchdforge.process import SubprocessRunner
-from avchdforge.season import merge_avchd_trees
 from avchdforge.selection import TrackSelection
 from avchdforge.tooling import locate_tool
 
@@ -279,91 +282,120 @@ def test_small_split_size_produces_multiple_parts_within_the_limit(
 # --------------------------------------------------------------------------
 
 
-def _mux_episode(
-    source: Path, tools: dict[str, Path], output_dir: Path, temp_dir: Path
-) -> Path:
-    """Mux one episode without the USB rename, the way the season merge needs it.
+#: The optical suffix each AVCHD-on-FAT32 suffix stands for (backend tables).
+OPTICAL_SUFFIXES = {".MPL": ".mpls", ".CPI": ".clpi", ".MTS": ".m2ts"}
 
-    ``execute_plan`` ends by renaming the tree to the AVCHD-on-FAT32 names; a
-    season merge renumbers whole trees instead and renames once, afterwards, so
-    this helper stops right before that step. Prep steps still run — the
-    window-repaired episode needs one.
+
+def optical_copy(root: Path, target: Path) -> Path:
+    """A copy of the shipped (FAT32-named) tree in the names libbluray opens.
+
+    The season ships with ``INDEX.BDM`` and friends — that is what a PS3 needs
+    (``docs/CONTEXT.md`` §2.11) — and libbluray only opens the optical names, so
+    the VM tests drive a copy of the same bytes. The mapping comes from the same
+    tables the rename uses, so the copy cannot drift from what the app writes.
     """
+    shutil.copytree(root, target)
+    for base in (target / "BDMV", target / "BDMV" / "BACKUP"):
+        for optical, usb in USB_FILE_RENAMES:
+            if (base / usb).is_file():
+                (base / usb).rename(base / optical)
+        for pattern, suffix in USB_SUFFIX_RENAMES:
+            directory, _, glob = pattern.partition("/")
+            optical_suffix = Path(glob).suffix
+            for path in sorted((base / directory).glob(f"*{suffix}")):
+                path.rename(path.with_suffix(optical_suffix))
+    return target
+
+
+def _episode_plan(source: Path, tools: dict[str, Path], episode_dir: Path):
+    """Stage one episode the way a season run stages it: a scratch dir each."""
     runner = SubprocessRunner()
     media = probe(source, runner, tool=str(tools["ffprobe"]))
     selection = TrackSelection(audio=tuple(track.index for track in media.audio))
-    plan = plan_for_source(
+    return plan_for_source(
         source,
         runner,
-        output_dir=output_dir,
-        temp_dir=temp_dir,
+        output_dir=episode_dir,
+        temp_dir=episode_dir,
         selection=selection,
         options=PlanOptions(tsmuxer=str(tools["tsMuxeR"]), ffmpeg=str(tools["ffmpeg"])),
         ffprobe=str(tools["ffprobe"]),
     )
-    plan.temp_dir.mkdir(parents=True, exist_ok=True)
-    for step in plan.prep_steps:
-        run_prep_step(plan, step, runner, ffprobe=str(tools["ffprobe"]))
-    run_mux(plan, runner)
-    return plan.output_dir
 
 
 @pytest.fixture(scope="session")
 def season_tree(tools: dict[str, Path], sample: Path, window_sample: Path, tmp_path_factory):
-    """Two real muxes merged into one tree: the shape the season support ships."""
+    """Two real muxes through the app's season path, renamed like the shipped tree.
+
+    ``execute_season`` runs the complete flow the GUI runs — prep steps (the
+    window-repaired episode needs one), mux, per-episode verification, the
+    merge, the AVCHD-on-FAT32 rename and the final tree check — so this fixture
+    is the season pipeline with real tools, not a hand-assembled one.
+    """
     work = tmp_path_factory.mktemp("e2e-season")
-    sources = [
-        _mux_episode(sample, tools, work / "episode1", work / "tmp1"),
-        _mux_episode(window_sample, tools, work / "episode2", work / "tmp2"),
+    staging = work / "staging"
+    plans = [
+        _episode_plan(sample, tools, staging / "episode-01"),
+        _episode_plan(window_sample, tools, staging / "episode-02"),
     ]
-    merged = merge_avchd_trees(sources, work / "season" / "AVCHD")
-    assert merged.playlists == (0, 1)
-    return merged.root
+    outcome = execute_season(
+        plans,
+        SubprocessRunner(),
+        destination=work / "season" / "AVCHD",
+        ffprobe=str(tools["ffprobe"]),
+        owns_temp=True,
+    )
+    assert outcome.playlists == (0, 1)
+    assert not staging.exists(), "a successful season run cleans its staging root"
+    return outcome.root
 
 
 def test_merged_season_tree_holds_one_title_per_episode(season_tree: Path) -> None:
     bdmv = season_tree / "BDMV"
+    # The PS3 USB flavour: both episodes' parts, under the 8.3 names.
     assert sorted(path.name for path in (bdmv / "STREAM").iterdir()) == [
-        "00000.m2ts",
-        "00001.m2ts",
+        "00000.MTS",
+        "00001.MTS",
     ]
 
-    index = parse_index((bdmv / "index.bdmv").read_bytes())
+    index = parse_index((bdmv / "INDEX.BDM").read_bytes())
     assert [title.id_ref for title in index.titles] == [0, 1]
     assert index.top_menu.id_ref == 2
     assert index.first_play.id_ref == 3
 
-    objects = parse_movie_objects((bdmv / "MovieObject.bdmv").read_bytes())
+    objects = parse_movie_objects((bdmv / "MOVIEOBJ.BDM").read_bytes())
     assert len(objects) == 4
     assert objects[0].commands[3] == play_playlist(0)
     assert objects[1].commands[3] == play_playlist(1)
 
-    # the second episode's playlist was renumbered: its clip reference moved
-    second = (bdmv / "PLAYLIST/00001.mpls").read_bytes()
+    # the second episode's playlist was renumbered: its clip reference moved —
+    # and the USB rename leaves playlist bytes alone
+    second = (bdmv / "PLAYLIST/00001.MPL").read_bytes()
     assert b"00001M2TS" in second
     assert b"00000M2TS" not in second
 
     # BACKUP carries the same rebuilt navigation
-    assert (bdmv / "BACKUP/MovieObject.bdmv").read_bytes() == (
-        bdmv / "MovieObject.bdmv"
+    assert (bdmv / "BACKUP/MOVIEOBJ.BDM").read_bytes() == (
+        bdmv / "MOVIEOBJ.BDM"
     ).read_bytes()
-    assert (bdmv / "BACKUP/index.bdmv").read_bytes() == (bdmv / "index.bdmv").read_bytes()
+    assert (bdmv / "BACKUP/INDEX.BDM").read_bytes() == (bdmv / "INDEX.BDM").read_bytes()
 
 
 def test_libbluray_plays_episode_1_on_insert_and_episode_2_via_title_search(
-    season_tree: Path,
+    season_tree: Path, tmp_path: Path
 ) -> None:
     """libbluray runs the real HDMV VM: insert, then Go To -> Title 2."""
+    optical = optical_copy(season_tree, tmp_path / "optical")
     try:
-        disc = open_disc(season_tree)
+        disc = open_disc(optical)
     except OSError as exc:
         pytest.skip(str(exc))
     with disc:
         assert disc.play(), "disc insert must start the FirstPlay object"
-        assert starts_with_clip(disc.read(), season_tree / "BDMV/STREAM/00000.m2ts"), (
+        assert starts_with_clip(disc.read(), optical / "BDMV/STREAM/00000.m2ts"), (
             "inserting the disc must play episode 1 (title 1)"
         )
         assert disc.play_title(2), "title 2 must be selectable"
-        assert starts_with_clip(disc.read(), season_tree / "BDMV/STREAM/00001.m2ts"), (
+        assert starts_with_clip(disc.read(), optical / "BDMV/STREAM/00001.m2ts"), (
             "'Go To -> Title 2' must play episode 2"
         )
