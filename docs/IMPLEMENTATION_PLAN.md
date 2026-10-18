@@ -302,3 +302,32 @@ names, so a second run into the same folder would overwrite the first title.
 | AVCHD strictness vs. PS3 leniency (AAC, level 4.2, 24 Mbps) | implemented as warnings, never silent failures; documented in README |
 | `lsblk` unavailable (non-Linux) | fallback path + manual warning text; documented as Linux-first |
 | Very long paths / non-ASCII on FAT32 | meta quoting, temp dir under `$TMPDIR`, e2e case with a space in the path |
+
+## 6. Season support (approved direction, 2026-10-18)
+
+Goal: N episodes in one AVCHD folder, one title per episode, picked with the
+player's own "Go To → Title X" (D26/§2.13 of `docs/CONTEXT.md`). The golden
+rules do not change: no transcoding, no Qt in the core, pure argv/byte builders,
+and nothing counts as done before a PS3 has played it.
+
+Ordered work:
+
+1. **Foundation + PS3 spike** *(this step; console test pending)* — `bdmv.py`
+   (title table and movie objects; byte-identical to tsMuxeR for one title),
+   `season.py` (`merge_avchd_trees`), golden fixtures in `tests/data/bdmv/`,
+   e2e checks through libbluray's HDMV VM, and
+   `scripts/build_season_spike.py` to produce the console tree from real episode
+   files.
+2. **GUI integration** (after the spike answers) — accept several sources as one
+   season, one plan per source, merge in place of the single-tree rename, V20
+   revisited for "add episodes to an existing season folder", per-episode
+   progress and failure reporting, chapters per episode (the `custom_chapters` /
+   `auto_chapters_minutes` plumbing already exists in `meta.py`).
+3. **Authored top menu** (only if the console's title search proves unusable) —
+   needs an HDMV/IG compiler, which no open-source tool provides and tsMuxeR
+   cannot ingest; the title-table layout from step 1 is unchanged by it, so the
+   foundation keeps its value either way.
+4. **Fallback** — one joined title with episode chapter marks (tsMuxeR's join
+   syntax is confirmed and `custom_chapters` is wired), losing per-episode
+   titles.
+

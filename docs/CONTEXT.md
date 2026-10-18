@@ -329,6 +329,66 @@ tsMuxeR muxes as `track=0` (D9). Verified with the real tools
 A sampled-luma check of the to-be-exposed rows before planning is a possible
 follow-up (see §4).
 
+### 2.13 Season navigation: what a title table is, and how the app writes its own
+
+A player picks episodes from an AVCHD disc through the disc's *title table*:
+`index.bdmv` maps each title to an HDMV *movie object*, and `MovieObject.bdmv`
+holds those objects as short straight-line programs. tsMuxeR writes exactly one
+title per tree, so a season needs navigation files of its own. Everything below
+was established byte-by-byte against tsMuxeR 2.7.0's AVCHD output and
+libbluray's parsers (`index_parse.c`, `mobj_parse.c`, `hdmv_vm.c`), and is
+implemented in `avchdforge.bdmv` and `avchdforge.season`:
+
+* `index.bdmv` **(verified)**: `INDX` + version `0100` + body address (`0x4E`) +
+  extension-data address; the body is a length-prefixed title table — FirstPlay
+  entry, TopMenu entry, a `u16` title count, then one 12-byte entry per title.
+  An entry is `40 00 00 00` (HDMV movie object, no "access" flags) + an
+  interactive flag + a `u16` object index. tsMuxeR's file is 528 bytes for one
+  title and grows by exactly 12 bytes per extra title; the 408-byte AVCHD
+  extension block after the table (the `IDEX` blob) is preserved verbatim
+  (libbluray logs it as `unknown extension 4096.256`, harmless).
+* `MovieObject.bdmv` **(verified)**: `MOBJ` + version + payload length + object
+  count, then per object a `u16` flag word (bit 15 = resume intention, set on
+  all of tsMuxeR's objects) and a command list of 12-byte instructions
+  (opcode | dst | src). tsMuxeR's objects use `move`, `play playlist` (from a
+  mark register), `ne` — which *skips the next command when the values are
+  equal* — `jump title`, and `break` (ends the object).
+* Title numbering **(verified in libbluray's VM)**: titles are 1-based;
+  `JumpTitle 0` is the TopMenu entry, `0xFFFF` FirstPlay. tsMuxeR's disc start
+  is FirstPlay → TopMenu → `JumpTitle 1`, so inserting the disc plays title 1
+  and the Top Menu button (the same object) restarts title 1.
+* `PLAY_PL` suspends the movie object, and with resume intention libbluray keeps
+  the title suspended at playlist end instead of continuing. Nothing in the
+  season layout depends on it, but it is why tsMuxeR's TopMenu object ends in
+  `jump title 1` instead of relying on fallthrough.
+* The multi-title layout the app writes: objects `0..N-1` are the episodes
+  (title `i+1` runs object `i`, which plays playlist `i`), object `N` is
+  tsMuxeR's TopMenu object and object `N+1` its FirstPlay object. With `N = 1`
+  the files are byte-identical to tsMuxeR's own — golden fixtures in
+  `tests/data/bdmv/`, asserted in `tests/test_bdmv.py`.
+* Merging trees (`season.merge_avchd_trees`) **(verified with real muxes)**: the
+  first episode's tree is copied as is; every later episode's clips, clip
+  information and playlists are shifted above the numbers already used, and the
+  `00000M2TS`-style clip references *inside its `.mpls`* are rewritten. `.clpi`
+  files carry no names of their own and are copied untouched; `index.bdmv` and
+  `MovieObject.bdmv` are rebuilt for the merged tree, in `BDMV/` and in
+  `BDMV/BACKUP/`. Playlist numbers follow the episodes' first clip numbers, so
+  the episode playlists are `0, n1, n1+n2, …`.
+* Local player check **(verified)**: libbluray's HDMV VM, driven through
+  `bd_play` (disc insert) and `bd_play_title 2` ("Go To → Title 2"), reads
+  episode 1's clip after insertion and episode 2's after the title search
+  (`tests/test_e2e.py`, binding in `tests/libbluray.py`). libbluray opens only
+  the optical names, so the FAT32 flavour (`INDEX.BDM`) is invisible to it —
+  that half stays a console question (§4).
+* Community knowledge, not verified here: one AVCHD folder per USB drive is what
+  the XMB auto-mounts (multiAVCHD's author on doom9), which is why a season is
+  one folder with N titles instead of N folders with one title each.
+
+`scripts/build_season_spike.py` runs the whole path on real episode files — the
+application's own mux per episode (probe → plan → prep → tsMuxeR), the merge,
+one rename to the FAT32 names — and prints the title table it wrote, so the
+console test uses exactly the tree the feature will ship.
+
 ## 3. Decision log
 
 | # | Date | Decision | Why |
@@ -358,9 +418,16 @@ follow-up (see §4).
 | D23 | 2026-10-16 | The mux destination is `<chosen folder>/AVCHD` unless the chosen folder is itself named `AVCHD` (case-insensitive); `plan.avchd_destination` normalises it inside `build_plan`, `run_mux` creates the folder, and the cancellation leftover scan looks there | the PS3 mounts AVCHD from a USB drive root only from a folder called `AVCHD` (§2.11), and making the user create or select that folder is a needless failure point. Pointing at the drive root now just works, and pointing at an existing `AVCHD` folder does not nest a second one |
 | D24 | 2026-10-17 | The run bar weighs the phases by the data they move: a prep step is `PREP_STEP_WEIGHT = 1` (one read of the source), the mux `MUX_WEIGHT = 2` (that read plus the write), and the post-mux tail (flush, index, playlist, rename, verify, cleanup) a fixed `TAIL_SHARE = 2%` | with verification holding a whole unit of the bar, the mux ended at `(n+1)/(n+2)` — 80% with the reporter's three prep steps — and the tail then jumped the bar to 100%; the tail is seconds against the mux's minutes, so the transfer must end near the top |
 | D25 | 2026-10-17 | Non-standard video sizes are repaired or refused, never tolerated: V4 warns when `VideoTrack.restore_window()` finds a lossless SPS-window rewrite (the plan then carries a `video-window` prep step, `-c:v copy -bsf:v h264_metadata=…,dump_extra`, muxed from the raw ES as `track=0`) and stays a hard error otherwise; `restore_window()` also feeds the subtitle render size, the V6 frame-rate ceiling and the V13 PGS check with the *output* size, and `check_prep_output`/`_video_problem` verify the repaired size. The `mux/allow_nonstandard_resolution` opt-in is removed everywhere (`AppSettings`, `PlanOptions`, the Preferences checkbox, the re-check on policy change, `jobs`/`plan` re-validation) | D20's premise ("the PS3 usually plays cropped 1080p") is falsified — the reporter's PS3 refused 1920x1036 — so the opt-in only produced titles that were outside AVCHD *and* unplayable, while a warning the user could not act on is worse than none. Window-cropped releases are common and the repair is bit-exact (§2.12), so the two shapes deserve opposite verdicts rather than one override: repairable → warn and do it; unreachable → refuse, because only a re-encode could pad it and avchd-forge never re-encodes |
+| D26 | 2026-10-18 | Season support starts as **one AVCHD folder, one title per episode**: `bdmv.py` writes the multi-title `index.bdmv`/`MovieObject.bdmv` (episode objects `0..N-1`, tsMuxeR's TopMenu object `N`, its FirstPlay object `N+1`), `season.py` merges the per-episode mux trees by renumbering clips, and navigation uses the player's own "Go To → Title X" plus the Top Menu button. Chapters stay inside each episode's playlist; an authored HDMV/IG top menu is deferred, and one joined title + chapters is kept as the fallback. The single-title case must stay byte-identical to tsMuxeR's own files (`N = 1` golden fixtures), and the feature is **PS3-verification pending**, like D22. Work order: foundation + console spike first, GUI integration only after the spike answers (§2.13, `docs/IMPLEMENTATION_PLAN.md` §6) | "Go To → Title X" is documented for AVCHD players (Sony's TS3 manual) and needs no graphics, so the no-transcode rule keeps zero exceptions; an authored menu needs an HDMV/IG compiler that no open-source tool provides (tsMuxeR cannot ingest IG), and a joined title cannot be addressed per episode at all — the PS3 shows its chapters as one flat list. Checking the console's acceptance of a two-title tree before building any UI avoids designing a season mode around a layout the PS3 refuses |
 
 ## 4. Open items
 
+* Season navigation (D26/§2.13) is written, merged and verified against
+  libbluray's HDMV VM, but **no PS3 has played a season tree yet**. The spike
+  tree (`scripts/build_season_spike.py`) needs the console's answers to four
+  questions: does the XMB list it, does insertion play episode 1, does
+  "Go To → Title X" reach every episode, and what does the Top Menu button do.
+  Record the answers here before the GUI grows a season mode.
 * `tests/data/tsmuxer/detect_mkv.txt` must be refreshed if a future tsMuxeR changes
   the detection layout — the parser is deliberately lenient about spacing.
 * AVCHD legality of AAC and of level 4.2 is treated as a warning, not an error
