@@ -24,6 +24,18 @@ shape are copied from real output.
 | `tools/*.txt` | real | captured `ffmpeg -encoders/-bsfs/-muxers/-version`, `ffprobe -version` and `tsMuxeR --version` output: the parsers in `tooling.py` are asserted against these |
 | `tools/ffmpeg_progress_subtitle.txt` | real | `ffmpeg -progress pipe:1 -nostats` blocks from an SRT conversion: the `FfmpegProgressScanner` fixture |
 | `meta/*.meta` | golden | expected tsMuxeR meta-file output; update deliberately together with `meta.py` |
+| `bdmv/avchd_index.bdmv` | real | `index.bdmv` tsMuxeR 2.7.0 wrote for a real single-title AVCHD run: the golden file for `bdmv.build_index` and `bdmv.season_navigation([0])` |
+| `bdmv/avchd_movieobject.bdmv` | real | the matching `MovieObject.bdmv` (episode + TopMenu + FirstPlay objects): the golden file for `bdmv.build_movie_objects` |
+
+The two `bdmv/` files come from the same `e2e`-style mux run as the
+`tsmuxer/mux_success.txt` capture. They pin the byte layout of the navigation
+data the season support writes itself (`src/avchdforge/bdmv.py`); libbluray's
+parsers (`index_parse.c`, `mobj_parse.c`, `hdmv_vm.c`) are the reference for
+what each field means, tsMuxeR's own output is the reference for the bytes.
+The tree they were captured from is single-title, i.e. exactly
+`season_navigation([0])` — see `tests/test_bdmv.py` for the byte-for-byte
+assertions, and libbluray-driven behaviour checks (disc insert / Go To Title)
+under `@pytest.mark.e2e` in `tests/test_e2e.py`.
 
 `meta/plan_*.meta` are rendered from a whole `JobPlan` (`tests/plan_jobs.py`) rather
 than from a bare `MuxJob`, i.e. they are what the application really sends.

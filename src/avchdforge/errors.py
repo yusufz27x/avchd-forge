@@ -99,6 +99,14 @@ class ExistingTreeError(AvchdForgeError):
         )
 
 
+class NavigationDataError(AvchdForgeError):
+    """``index.bdmv`` or ``MovieObject.bdmv`` does not hold the expected data."""
+
+
+class SeasonMergeError(AvchdForgeError):
+    """Episode trees cannot be merged: an input is not a clean single-title tree."""
+
+
 class PrepError(ToolExecutionError):
     """An ffmpeg preparation step (core extraction, subtitle conversion) failed."""
 
@@ -166,9 +174,11 @@ __all__ = [
     "Issue",
     "JobCancelled",
     "MuxError",
+    "NavigationDataError",
     "PlanError",
     "PrepError",
     "ProbeError",
+    "SeasonMergeError",
     "ToolExecutionError",
     "ToolNotFoundError",
     "TrackMappingError",
