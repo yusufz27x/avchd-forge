@@ -22,6 +22,7 @@ from avchdforge.drives import (
     TargetReport,
     assess_target,
     existing_tree,
+    filesystem_type,
     find_drive,
     format_size,
     free_bytes,
@@ -301,6 +302,37 @@ def test_free_bytes_reports_the_real_usage(tmp_path: Path) -> None:
     assert free is not None and free > 0
     # a path that does not exist yet walks up to its nearest existing parent
     assert free_bytes(tmp_path / "not" / "created" / "yet") == pytest.approx(free, rel=0.1)
+
+
+# --------------------------------------------------------------------------
+# filesystem_type
+# --------------------------------------------------------------------------
+
+
+def test_filesystem_type_picks_the_deepest_mount(monkeypatch, tmp_path: Path) -> None:
+    from avchdforge import drives as module
+
+    mounts = tmp_path / "mounts"
+    mounts.write_text(
+        "/dev/sda1 / ext4 rw,relatime 0 0\n"
+        "tmpfs /tmp tmpfs rw,nosuid,nodev 0 0\n"
+        "/dev/sdb1 /media/user/PS3\\040USB vfat rw 0 0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "PROC_MOUNTS", mounts)
+
+    assert filesystem_type("/tmp/pytest-of-user") == "tmpfs"
+    assert filesystem_type("/tmp") == "tmpfs"
+    assert filesystem_type("/home/user/movie.mkv") == "ext4"
+    assert filesystem_type("/media/user/PS3 USB/AVCHD") == "vfat"
+
+
+def test_filesystem_type_returns_none_without_proc_mounts(monkeypatch, tmp_path: Path) -> None:
+    from avchdforge import drives as module
+
+    monkeypatch.setattr(module, "PROC_MOUNTS", tmp_path / "not-there")
+
+    assert filesystem_type(tmp_path) is None
 
 
 # --------------------------------------------------------------------------

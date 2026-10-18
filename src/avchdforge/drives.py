@@ -415,6 +415,35 @@ def free_bytes(path: Path | str) -> int | None:
     return None  # pragma: no cover - only when nothing on the path exists
 
 
+def filesystem_type(path: Path | str) -> str | None:
+    """The filesystem type ``path`` lives on (``"ext4"``, ``"tmpfs"``, …).
+
+    Read from ``/proc/mounts`` rather than ``lsblk``, because the case that
+    matters for a free-space message has no block device at all: on many
+    distributions the system temp directory is a memory-backed ``tmpfs``, and a
+    job that stages whole episodes there runs out of RAM, not out of disk. The
+    deepest mount point containing ``path`` wins, as the kernel does it.
+    """
+    target = Path(path).expanduser()
+    try:
+        text = PROC_MOUNTS.read_text(encoding="utf-8", errors="replace")
+        resolved = target.resolve()
+    except OSError:  # pragma: no cover - not Linux, no /proc, or a symlink loop
+        return None
+    best: tuple[int, str] | None = None
+    for line in (text or "").splitlines():
+        fields = line.split()
+        if len(fields) < 3:
+            continue
+        mountpoint = Path(_unescape_mount(fields[1]))
+        if not resolved.is_relative_to(mountpoint):
+            continue
+        depth = len(mountpoint.parts)
+        if best is None or depth > best[0]:
+            best = (depth, fields[2])
+    return best[1] if best is not None else None
+
+
 def existing_tree(path: Path | str) -> Path | None:
     """The AVCHD marker already present under ``path``, or ``None``.
 
@@ -546,6 +575,7 @@ __all__ = [
     "TargetReport",
     "assess_target",
     "existing_tree",
+    "filesystem_type",
     "find_drive",
     "format_size",
     "free_bytes",

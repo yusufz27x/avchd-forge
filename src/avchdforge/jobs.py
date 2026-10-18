@@ -56,6 +56,7 @@ from .errors import (
     ExistingTreeError,
     JobCancelled,
     MuxError,
+    OutOfSpaceError,
     PrepError,
     ProbeError,
     ToolExecutionError,
@@ -86,6 +87,7 @@ RunnerFactory = Callable[[], Runner]
 _FAILURE_TITLES: tuple[tuple[type[BaseException], str], ...] = (
     (ValidationFailed, "This file cannot be used"),
     (ExistingTreeError, "The output folder cannot be used"),
+    (OutOfSpaceError, "Not enough free space"),
     (ProbeError, "Could not read the input file"),
     (PrepError, "A preparation step failed"),
     (MuxError, "tsMuxeR failed"),

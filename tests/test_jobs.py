@@ -872,6 +872,30 @@ def test_season_job_keeps_the_staging_trees_on_failure(tmp_path: Path) -> None:
     assert (tmp_path / "out" / "AVCHD" / "BDMV").is_dir()
 
 
+def test_season_job_reports_a_temp_folder_that_cannot_hold_an_episode(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The space check fires before the first mux and says what to do (D29)."""
+    runner = FakeRunner()
+    script_season_success(runner)
+    monkeypatch.setattr("avchdforge.backend.free_bytes", lambda path: 1_000_000)
+    job = make_job(runner)
+    watcher = JobWatcher(job)
+
+    job.start_season(season_request_for(tmp_path))
+
+    assert watcher.events[-1] == "failed"
+    failure = watcher.failures[0]
+    assert failure.title == "Not enough free space"
+    assert failure.detail.startswith("Not enough free space in")
+    assert "Temporary files" in failure.message
+    assert failure.temp_dir is not None and failure.temp_dir.is_dir()
+    # the probes and the detection runs planned the season, but nothing was muxed
+    assert not any(
+        "tsmuxer-meta.txt" in argument for call in runner.calls for argument in call
+    )
+
+
 def test_season_job_refuses_an_existing_tree_before_any_tool_runs(tmp_path: Path) -> None:
     output = tmp_path / "out"
     (output / "AVCHD" / "BDMV").mkdir(parents=True)

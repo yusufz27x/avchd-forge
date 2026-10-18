@@ -22,13 +22,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
 
+from .drives import filesystem_type, free_bytes
 from .errors import (
     JobCancelled,
     MuxError,
+    OutOfSpaceError,
     PrepError,
     ProbeError,
     SeasonMergeError,
     VerificationError,
+    looks_like_no_space,
 )
 from .plan import AVCHD_DIR_NAME, JobPlan, PlannedTrack
 from .prep import PrepStep, check_prep_output
@@ -404,6 +407,27 @@ TAIL_SHARE: Final[float] = 0.02
 #: (``execute_season``), which keeps the bar's total the same.
 MERGE_WEIGHT: Final[float] = MUX_WEIGHT
 
+#: Room the space check wants in the temp directory on top of the plan's own
+#: estimates. An extracted DTS-HD/TrueHD core or a converted subtitle is a
+#: fraction of this, so it covers them without guessing their sizes; the mux's
+#: own working files (meta text, playlist, clip info) are smaller still.
+TEMP_HEADROOM: Final[int] = 1 << 30
+
+#: Advice for a temp directory that is too small. The system default is the
+#: trap: ``tempfile.gettempdir()`` is ``/tmp``, which many distributions mount
+#: as a memory-backed tmpfs of a few GB — a season that stages whole episodes
+#: there runs out of RAM, not out of disk (D29).
+TEMP_SPACE_HINT: Final[str] = (
+    "Free space there, or point the Temporary files folder (Preferences → "
+    "Paths) at a drive with room. A temp folder on the output's drive also "
+    "lets a season move each episode instead of copying it."
+)
+
+#: Advice for an output drive that is full (a single job muxes straight into it).
+OUTPUT_SPACE_HINT: Final[str] = (
+    "Free space on that drive, or choose another output folder."
+)
+
 
 class _RunBar:
     """One run's progress arithmetic: phase fractions onto a single 0..1 bar.
@@ -452,6 +476,61 @@ class _RunBar:
             self._on_progress(1.0)
 
 
+def temp_space_needed(plan: JobPlan) -> int | None:
+    """Rough bytes ``plan`` needs in its temp directory at once, or ``None``.
+
+    What the plan writes there is what matters: a repaired video stream (a
+    window fix) is source-sized, while audio cores and converted subtitles are
+    small enough for :data:`TEMP_HEADROOM`. When the mux itself writes into temp
+    — a season stages each episode at ``plan.temp_dir/AVCHD`` — its output tree
+    is source-sized too and is counted. The estimates are the plan's own
+    (:attr:`~avchdforge.plan.JobPlan.estimated_size_bytes`), which makes the
+    check as good as the mux's own write gauge.
+    """
+    source = plan.estimated_size_bytes or plan.media.size_bytes
+    if not source:
+        return None
+    needed = TEMP_HEADROOM
+    if any(step.kind == "video-window" for step in plan.prep_steps):
+        needed += source
+    if plan.output_dir.is_relative_to(plan.temp_dir):
+        needed += source
+    return needed
+
+
+def check_temp_space(plan: JobPlan) -> None:
+    """Fail before a step writes when the temp directory cannot hold the plan.
+
+    Naming the folder, the estimate and the free space is the difference
+    between a diagnosis and a puzzle: a tool that runs out of room reports a
+    bare exit code (ffmpeg's ENOSPC surfaces as ``228``), which reads as a bug
+    in the tool rather than as a full filesystem — often the RAM-backed
+    ``/tmp`` a season's staged episodes do not fit in (D29).
+    """
+    needed = temp_space_needed(plan)
+    if needed is None:
+        return
+    free = free_bytes(plan.temp_dir)
+    if free is None or free >= needed:
+        return
+    raise OutOfSpaceError(
+        plan.temp_dir,
+        needed_bytes=needed,
+        free_bytes=free,
+        hint=_temp_space_hint(plan.temp_dir),
+    )
+
+
+def _temp_space_hint(path: Path) -> str:
+    """The space advice for ``path``, calling out a memory-backed filesystem."""
+    if filesystem_type(path) == "tmpfs":
+        return (
+            f"{path} is a memory-backed (tmpfs) filesystem, so its free space "
+            f"is RAM, not disk. {TEMP_SPACE_HINT}"
+        )
+    return TEMP_SPACE_HINT
+
+
 def _mux_one(
     plan: JobPlan,
     runner: Runner,
@@ -469,11 +548,16 @@ def _mux_one(
     mux also writes the output, hence the weights (:data:`PREP_STEP_WEIGHT`
     against :data:`MUX_WEIGHT`). ``prefix`` labels the stage names for a season
     — ``"episode 2/3: "`` — and stays empty for a single job.
+
+    The temp directory is checked for room first: this is the last point before
+    data is written, and the first point where an out-of-space run can be
+    reported as one instead of as a tool failure (D29).
     """
 
     def stage(text: str) -> str:
         return f"{prefix}{text}"
 
+    check_temp_space(plan)
     prep_weight = len(plan.prep_steps) * PREP_STEP_WEIGHT
     for index, step in enumerate(plan.prep_steps):
         if runner.cancelled:
@@ -833,7 +917,9 @@ def run_prep_step(
 
     Raises :class:`~avchdforge.errors.PrepError` when ffmpeg fails and
     :class:`~avchdforge.errors.VerificationError` when the produced file is not
-    the codec the step promised.
+    the codec the step promised. A failure that is really a full temp
+    filesystem — ffmpeg reports ENOSPC as exit code 228 — raises
+    :class:`~avchdforge.errors.OutOfSpaceError` instead, naming the folder.
     """
     if on_line is not None:
         on_line(f"$ {step.command_line}\n")
@@ -848,6 +934,17 @@ def run_prep_step(
     if not result.ok:
         if runner.cancelled:
             raise JobCancelled(step.label)
+        output = result.output
+        if looks_like_no_space(result.returncode, output):
+            # The step writes into the plan's temp directory by construction
+            # (prep.py), so that is the folder to name.
+            raise OutOfSpaceError(
+                plan.temp_dir,
+                tool=_tool_name(step.argv[0]),
+                returncode=result.returncode,
+                output=output,
+                hint=_temp_space_hint(plan.temp_dir),
+            )
         raise PrepError(
             _tool_name(step.argv[0]),
             step.argv,
@@ -871,7 +968,13 @@ def run_mux(
     on_line: LineCallback | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> CompletedRun:
-    """Write the meta file and run tsMuxeR; raise :class:`MuxError` on failure."""
+    """Write the meta file and run tsMuxeR; raise :class:`MuxError` on failure.
+
+    A failure that is really a full filesystem — tsMuxeR writing the tree or
+    ffmpeg writing a repaired stream — raises
+    :class:`~avchdforge.errors.OutOfSpaceError` instead of :class:`MuxError`,
+    naming the folder that ran out of room (D29).
+    """
     # plan.output_dir is the AVCHD folder (:func:`avchdforge.plan.avchd_destination`);
     # it may not exist yet when the user pointed at a drive root, and tsMuxeR
     # expects the folder it writes into to be there.
@@ -890,6 +993,20 @@ def run_mux(
     if not result.ok:
         if runner.cancelled:
             raise JobCancelled("muxing")
+        output = result.output
+        if looks_like_no_space(result.returncode, output):
+            hint = (
+                _temp_space_hint(plan.output_dir)
+                if plan.output_dir.is_relative_to(plan.temp_dir)
+                else OUTPUT_SPACE_HINT
+            )
+            raise OutOfSpaceError(
+                plan.output_dir,
+                tool="tsMuxeR",
+                returncode=result.returncode,
+                output=output,
+                hint=hint,
+            )
         raise MuxError(
             "tsMuxeR", plan.mux_argv, result.returncode, result.stderr, result.stdout
         )
@@ -1038,6 +1155,7 @@ __all__ = [
     "FAT32_MAX_BYTES",
     "MERGE_WEIGHT",
     "MUX_WEIGHT",
+    "OUTPUT_SPACE_HINT",
     "PREP_STEP_WEIGHT",
     "REQUIRED_BDMV_DIRS",
     "REQUIRED_BDMV_FILES",
@@ -1045,6 +1163,8 @@ __all__ = [
     "SPLIT_OVERSHOOT_ALLOWANCE",
     "STREAM_DIR",
     "TAIL_SHARE",
+    "TEMP_HEADROOM",
+    "TEMP_SPACE_HINT",
     "USB_FILE_RENAMES",
     "USB_SUFFIX_RENAMES",
     "JobOutcome",
@@ -1055,11 +1175,13 @@ __all__ = [
     "VerificationReport",
     "check_output_tree",
     "check_stream_composition",
+    "check_temp_space",
     "execute_plan",
     "execute_season",
     "find_streams",
     "rename_tree_for_usb",
     "run_mux",
     "run_prep_step",
+    "temp_space_needed",
     "verify_output",
 ]

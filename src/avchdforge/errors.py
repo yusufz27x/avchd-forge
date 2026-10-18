@@ -222,6 +222,34 @@ def format_argv(argv: Sequence[str]) -> str:
     return " ".join(out)
 
 
+#: Exit codes a tool uses for a full filesystem. ffmpeg reports
+#: ``AVERROR(ENOSPC)`` — ``-28`` — and the shell keeps the low byte: 228.
+_NO_SPACE_CODES: Final[frozenset[int]] = frozenset({28, 228})
+
+#: Phrases a tool prints when it runs out of room, matched case-insensitively.
+_NO_SPACE_PHRASES: Final[tuple[str, ...]] = (
+    "no space left on device",
+    "not enough space",
+    "not enough disk space",
+    "insufficient space",
+    "disk full",
+)
+
+
+def looks_like_no_space(returncode: int | None, output: str) -> bool:
+    """Whether a failed tool is reporting a full filesystem.
+
+    Checked on both the exit code and the output because neither is reliable
+    alone: ffmpeg says ``228`` and "No space left on device", tsMuxeR only the
+    words, and a tool that was killed reports a negative code. The result turns
+    an opaque failure into an :class:`OutOfSpaceError`.
+    """
+    if returncode in _NO_SPACE_CODES:
+        return True
+    text = (output or "").lower()
+    return any(phrase in text for phrase in _NO_SPACE_PHRASES)
+
+
 def _last_lines(text: str, count: int) -> str:
     lines = [line for line in (text or "").splitlines() if line.strip()]
     return "\n".join(lines[-count:]) if lines else "(no output)"
@@ -245,4 +273,5 @@ __all__ = [
     "ValidationFailed",
     "VerificationError",
     "format_argv",
+    "looks_like_no_space",
 ]

@@ -23,19 +23,30 @@ from avchdforge.backend import (
     SPLIT_MB_BYTES,
     SPLIT_OVERSHOOT_ALLOWANCE,
     TAIL_SHARE,
+    TEMP_HEADROOM,
     JobOutcome,
     JobStage,
     SeasonOutcome,
     check_output_tree,
     check_stream_composition,
+    check_temp_space,
     execute_plan,
     execute_season,
     find_streams,
     rename_tree_for_usb,
     run_mux,
+    temp_space_needed,
     verify_output,
 )
-from avchdforge.errors import JobCancelled, MuxError, SeasonMergeError, VerificationError
+from avchdforge.drives import format_size
+from avchdforge.errors import (
+    JobCancelled,
+    MuxError,
+    OutOfSpaceError,
+    SeasonMergeError,
+    VerificationError,
+    looks_like_no_space,
+)
 from avchdforge.plan import JobPlan, PlanOptions, build_plan
 from avchdforge.probe import parse_ffprobe_json
 from avchdforge.selection import TrackSelection
@@ -1080,3 +1091,190 @@ def test_execute_season_refuses_plans_that_are_not_staged(tmp_path: Path) -> Non
     plan = ac3_plan(tmp_path)  # output <tmp>/out/AVCHD, scratch <tmp>/tmp
     with pytest.raises(SeasonMergeError, match="season muxes into"):
         execute_season([plan], FakeRunner(), destination=tmp_path / "season")
+
+
+# --------------------------------------------------------------------------
+# the temp free-space check and the ENOSPC translation
+# --------------------------------------------------------------------------
+
+
+def test_temp_space_needed_leaves_room_for_the_prepared_files(tmp_path: Path) -> None:
+    """A single job writes only its prepared files into temp, not the tree."""
+    plan = ac3_plan(tmp_path)  # an AC-3 track is copied: no prep step at all
+
+    assert temp_space_needed(plan) == TEMP_HEADROOM
+
+
+def test_temp_space_needed_counts_a_source_sized_repair(tmp_path: Path) -> None:
+    """A window repair leaves a source-sized elementary stream in temp."""
+    plan = window_plan(tmp_path)
+    estimate = plan.estimated_size_bytes
+
+    assert estimate is not None
+    assert temp_space_needed(plan) == estimate + TEMP_HEADROOM
+
+
+def test_temp_space_needed_counts_a_season_staged_mux_output(tmp_path: Path) -> None:
+    """A season plan muxes into temp, so the tree's size counts as well."""
+    plan = season_plan(tmp_path, 1)
+    estimate = plan.estimated_size_bytes
+
+    assert estimate is not None
+    assert temp_space_needed(plan) == estimate + TEMP_HEADROOM
+
+
+def test_temp_space_needed_is_none_without_an_estimate(tmp_path: Path) -> None:
+    """No duration and no container size means no estimate, so no check."""
+    media = build_media([vstream(0), astream(1)], size=None, duration=None)
+    plan = build_plan(
+        media,
+        TrackSelection(audio=(1,)),
+        AC3_DETECTION,
+        output_dir=tmp_path / "out",
+        temp_dir=tmp_path / "tmp",
+    )
+
+    assert temp_space_needed(plan) is None
+
+
+def test_check_temp_space_passes_when_there_is_room(tmp_path: Path, monkeypatch) -> None:
+    plan = season_plan(tmp_path, 1)
+    monkeypatch.setattr("avchdforge.backend.free_bytes", lambda path: 10**12)
+
+    check_temp_space(plan)  # no exception
+
+
+def test_check_temp_space_names_the_folder_and_the_numbers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    plan = season_plan(tmp_path, 1)
+    monkeypatch.setattr("avchdforge.backend.free_bytes", lambda path: 1_000_000)
+
+    with pytest.raises(OutOfSpaceError) as excinfo:
+        check_temp_space(plan)
+
+    message = str(excinfo.value)
+    needed = temp_space_needed(plan)
+    assert needed is not None
+    assert "Not enough free space in" in message
+    assert str(plan.temp_dir) in message
+    assert format_size(needed) in message and "is needed" in message
+    assert "is free" in message
+    assert "Preferences" in message and "Temporary files" in message
+    assert excinfo.value.path == plan.temp_dir
+    assert excinfo.value.needed_bytes == needed
+
+
+def test_check_temp_space_calls_out_a_memory_backed_folder(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The system temp default is a tmpfs on many systems; say so."""
+    plan = season_plan(tmp_path, 1)
+    monkeypatch.setattr("avchdforge.backend.free_bytes", lambda path: 0)
+    monkeypatch.setattr("avchdforge.backend.filesystem_type", lambda path: "tmpfs")
+
+    with pytest.raises(OutOfSpaceError) as excinfo:
+        check_temp_space(plan)
+
+    assert "memory-backed (tmpfs)" in str(excinfo.value)
+    assert "is RAM, not disk" in str(excinfo.value)
+
+
+def test_execute_season_refuses_to_start_when_temp_is_too_small(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The check runs before the first tool of the first episode."""
+    plans = [season_plan(tmp_path, 1), season_plan(tmp_path, 2)]
+    runner = FakeRunner()
+    script_season(runner)
+    monkeypatch.setattr("avchdforge.backend.free_bytes", lambda path: 1_000_000)
+
+    with pytest.raises(OutOfSpaceError, match="Not enough free space"):
+        execute_season(
+            plans, runner, destination=tmp_path / "out" / "AVCHD", owns_temp=True
+        )
+
+    assert runner.calls == []  # neither ffmpeg, nor tsMuxeR, nor ffprobe ran
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize(
+    ("returncode", "output", "expected"),
+    [
+        (228, "", True),  # ffmpeg: AVERROR(ENOSPC) is -28; the OS keeps the byte
+        (28, "", True),
+        (1, "Could not write: No space left on device", True),
+        (1, "not enough space to write the stream", True),
+        (1, "Disk full", True),
+        (1, "invalid stream", False),
+        (-9, "killed", False),
+        (None, "", False),
+    ],
+)
+def test_looks_like_no_space(returncode: int | None, output: str, expected: bool) -> None:
+    assert looks_like_no_space(returncode, output) is expected
+
+
+def test_a_prep_step_that_runs_out_of_space_names_the_temp_folder(
+    tmp_path: Path, runner
+) -> None:
+    plan = dts_hd_plan(tmp_path)  # the DTS core extraction runs ffmpeg first
+    runner.add(
+        FakeResponse(
+            stderr="av_interleaved_write_frame(): No space left on device",
+            returncode=228,
+            match="dca_core",
+        )
+    )
+
+    with pytest.raises(OutOfSpaceError) as excinfo:
+        execute_plan(plan, runner)
+
+    message = str(excinfo.value)
+    assert "ffmpeg" in message and "228" in message
+    assert str(plan.temp_dir) in message
+    assert "Temporary files" in message
+    assert "No space left on device" in message  # the tail is kept as evidence
+
+
+def test_a_mux_that_runs_out_of_space_names_the_output_folder(
+    tmp_path: Path, runner
+) -> None:
+    """tsMuxeR only says the words — no exit code a space check could trust."""
+    plan = ac3_plan(tmp_path)  # no prep steps, so the mux is the first tool
+    runner.add(
+        FakeResponse(
+            stderr="[error] not enough space to write the output",
+            returncode=1,
+            match="tsMuxeR",
+        )
+    )
+
+    with pytest.raises(OutOfSpaceError) as excinfo:
+        execute_plan(plan, runner)
+
+    message = str(excinfo.value)
+    assert "tsMuxeR" in message
+    assert str(plan.output_dir) in message
+    assert "another output folder" in message
+
+
+def test_a_season_mux_that_runs_out_of_space_names_the_temp_folder(
+    tmp_path: Path, runner
+) -> None:
+    """A season plan's output lives in temp, so the temp advice applies."""
+    plan = season_plan(tmp_path, 1)
+    runner.add(
+        FakeResponse(
+            stderr="No space left on device",
+            returncode=228,
+            match="tsMuxeR",
+        )
+    )
+
+    with pytest.raises(OutOfSpaceError) as excinfo:
+        execute_plan(plan, runner)
+
+    message = str(excinfo.value)
+    assert str(plan.output_dir) in message
+    assert "Temporary files" in message

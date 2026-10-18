@@ -135,13 +135,14 @@ class PreferencesDialog(QtWidgets.QDialog):
         row.addWidget(self.temp_edit, 1)
         row.addWidget(browse)
         layout.addLayout(row)
-        layout.addWidget(
-            QtWidgets.QLabel(
-                f"Empty means the system temp directory ({tempfile.gettempdir()}). "
-                "A fast local disk is best; the mux cleans up after itself.",
-                tab,
-            )
+        temp_help = QtWidgets.QLabel(
+            f"Empty means the system temp directory ({tempfile.gettempdir()}). "
+            "Give it a local disk with room: a season stages one episode there at "
+            "a time, and the system directory is often small and memory-backed.",
+            tab,
         )
+        temp_help.setWordWrap(True)
+        layout.addWidget(temp_help)
 
         self.keep_success_check = QtWidgets.QCheckBox(
             "Keep temporary files after a successful run", tab
