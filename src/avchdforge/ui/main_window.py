@@ -546,6 +546,15 @@ class MainWindow(QtWidgets.QMainWindow):
             return self._episodes[self._current]
         return None
 
+    def _index_of(self, path: Path | None) -> int | None:
+        """Position of a listed episode by path, or ``None`` when it is gone."""
+        if path is None:
+            return None
+        for index, episode in enumerate(self._episodes):
+            if episode.path == path:
+                return index
+        return None
+
     def open_source(self, path: Path | str | None = None) -> bool:
         """Open ``path`` as the single episode, or pick files when it is ``None``.
 
@@ -618,6 +627,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._show_episode(index)
         self._update_status()
         self._on_line(f"[avchd-forge] removed {removed.path.name} from the list\n")
+        self._probe_next()  # a paused queue (a cancelled read) picks up again here
         return True
 
     def move_episode(self, step: int) -> bool:
@@ -653,23 +663,17 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         episode = self._episodes[pending]
         self._show_episode(pending)
+        self._probing = episode.path
+        self._refresh_list()  # its row says "reading…" while the probe runs
         self.stage_label.setText(f"Reading {episode.path.name}")
         self.log_pane.set_stage(f"Reading {episode.path.name}")
-        self._probing = episode.path
         if not self._busy:
             self._set_busy(True)
         self._job.start_probe(episode.path, ffprobe=self._ffprobe_tool())
 
     def _on_probed(self, outcome: ProbeOutcome) -> None:
         self._probing = None
-        index = next(
-            (
-                position
-                for position, episode in enumerate(self._episodes)
-                if episode.path == outcome.source
-            ),
-            None,
-        )
+        index = self._index_of(outcome.source)
         if index is not None:
             episode = self._episodes[index]
             episode.outcome = outcome
@@ -700,7 +704,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if episode.failure is not None:
             return f"{header} — {episode.failure}"
         if episode.outcome is None:
-            return f"{header} — reading…"
+            state = "reading…" if episode.path == self._probing else "not read yet"
+            return f"{header} — {state}"
         media = episode.outcome.media
         summary = _track_summary(episode.selection)
         return f"{header} — {media.duration_label}, {summary}"
@@ -1048,14 +1053,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_failed(self, failure: JobFailure) -> None:
         if self._probing is not None:
             # A probe that could not answer: mark the episode and read the next.
-            index = next(
-                (
-                    position
-                    for position, episode in enumerate(self._episodes)
-                    if episode.path == self._probing
-                ),
-                None,
-            )
+            index = self._index_of(self._probing)
             self._probing = None
             if index is not None:
                 self._episodes[index].failure = failure.title
@@ -1076,6 +1074,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.notify(failure.detail)
 
     def _on_cancelled(self, cancellation: JobCancellation) -> None:
+        cancelled_probe = self._probing
+        self._probing = None
+        if cancelled_probe is not None:
+            # The read of this episode was stopped: mark it instead of leaving
+            # the queue claiming to read it. The rest of the list stays queued
+            # and is read when the queue is next poked (an add or a remove);
+            # the cancelled file itself has to be dropped and added again.
+            index = self._index_of(cancelled_probe)
+            if index is not None:
+                self._episodes[index].failure = "Reading cancelled"
+                self._refresh_list()
+                self._show_episode(index)
         self.progress_bar.setRange(0, 1000)
         self.stage_label.setText("Cancelled")
         self.log_pane.set_stage("")
@@ -1158,7 +1168,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return "Add a .mkv/.ts file first"
         pending = next((episode for episode in self._episodes if episode.pending), None)
         if pending is not None:
-            return f"Still reading {pending.path.name}…"
+            if pending.path == self._probing:
+                return f"Still reading {pending.path.name}…"
+            return f"{pending.path.name} has not been read yet"
         broken = next(
             (episode for episode in self._episodes if episode.failure is not None), None
         )
@@ -1203,7 +1215,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         pending = next((episode for episode in self._episodes if episode.pending), None)
         if pending is not None:
-            self.status_label.setText(f"Reading {pending.path.name}…")
+            self.status_label.setText(f"{pending.path.name} has not been read yet")
             return
         broken = next(
             (episode for episode in self._episodes if episode.failure is not None), None

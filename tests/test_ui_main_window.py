@@ -951,6 +951,43 @@ def test_open_source_after_a_season_replaces_the_list(tmp_path: Path) -> None:
     assert "EP01.mkv" not in [episode.path.name for episode in window.episodes]
 
 
+def test_cancelling_a_read_marks_the_row_and_pauses_the_queue(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    runner.add(
+        FakeResponse(
+            stderr="killed",
+            returncode=-9,
+            match="EP01.mkv",
+            side_effect=lambda _argv: runner.cancel(),
+        )
+    )
+    runner.add_stdout(PROBE_JSON_TEXT, match="EP02.mkv")
+    window = make_window(tmp_path, runner)
+    first = write_source(tmp_path, "EP01.mkv")
+    second = write_source(tmp_path, "EP02.mkv")
+
+    window.add_sources((first, second))
+
+    assert len(runner.calls) == 1  # the cancelled read stops the queue
+    assert window.episodes[0].failure == "Reading cancelled"
+    assert "EP01.mkv — Reading cancelled" in window.episode_list.item(0).text()
+    assert "not read yet" in window.episode_list.item(1).text()
+    assert window.status_label.text().startswith("Cancelled")
+    assert not window.start_button.isEnabled()
+    assert "EP02.mkv has not been read yet" in window.start_button.toolTip()
+
+    # Dropping the cancelled row pokes the queue, and the rest is read.
+    window.episode_list.setCurrentRow(0)
+    window.set_output_dir(tmp_path / "out")
+
+    assert window.remove_episode()
+
+    assert len(runner.calls) == 2
+    assert [episode.path for episode in window.episodes] == [second]
+    assert "0:00:04" in window.episode_list.item(0).text()
+    assert window.start_button.isEnabled()
+
+
 # --------------------------------------------------------------------------
 # window state
 # --------------------------------------------------------------------------
