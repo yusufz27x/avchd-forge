@@ -35,7 +35,7 @@ from .prep import PrepStep, check_prep_output
 from .probe import AudioTrack, MediaInfo, SubtitleTrack, VideoTrack, probe
 from .process import CompletedRun, LineCallback, ProgressCallback, Runner
 from .progress import FfmpegProgressScanner, TsmuxerScanner, is_mux_success
-from .season import merge_avchd_trees
+from .season import SeasonBuilder
 from .tracks import codec_family
 
 #: Stages a job passes through. ``probe`` and ``plan`` are emitted by the Qt job
@@ -399,7 +399,9 @@ MUX_WEIGHT: Final[float] = 2.0
 TAIL_SHARE: Final[float] = 0.02
 #: Run-bar weight of a season's merge: it hands the whole season to the
 #: destination once — a copy, or a rename per file when both sides share a
-#: filesystem — so one unit of the bar is the right price for it.
+#: filesystem — so one unit of the bar is the right price for it. The transfer
+#: happens an episode at a time, each episode allotted its share of that unit
+#: (``execute_season``), which keeps the bar's total the same.
 MERGE_WEIGHT: Final[float] = MUX_WEIGHT
 
 
@@ -608,6 +610,7 @@ def execute_season(
     on_line: LineCallback | None = None,
     on_progress: ProgressCallback | None = None,
     on_stage: StageCallback | None = None,
+    pump: Callable[[], None] | None = None,
     keep_temp_on_success: bool = False,
     keep_temp_on_failure: bool = True,
     owns_temp: bool | None = None,
@@ -622,17 +625,26 @@ def execute_season(
     must be empty or missing.
 
     Every episode is muxed and verified on its own tree first (tsMuxeR's output
-    is checked before anything is merged, so a bad episode cannot poison a
-    season), then the trees are handed to
-    :func:`avchdforge.season.merge_avchd_trees`, renamed to the AVCHD-on-FAT32
-    names and checked as one tree. ``move`` is implied unless the caller asked
-    for the temp directory to survive — keeping the temp means keeping the
-    staged trees, so the merge copies in that case.
+    is checked before it is merged, so a bad episode cannot poison a season),
+    and then handed to the season folder **right away**: the season is built one
+    episode at a time by :class:`~avchdforge.season.SeasonBuilder`, and the
+    episode's scratch files are dropped as soon as it is in. The temp directory
+    holds about one episode instead of the whole season (D29), which is what
+    makes a season run fit on a normal temp drive at all. ``move`` is implied
+    unless the caller asked for the temp directory to survive — keeping the temp
+    means keeping the staged trees, so the merge copies in that case, and then
+    the temp directory still grows with the whole season.
 
-    Cancellation and failure semantics match :func:`execute_plan`: a cancelled
-    or failed season keeps its staging root by default (the episode trees are
-    the evidence), and a successful one removes it unless
-    ``keep_temp_on_success`` says otherwise.
+    That incremental merge changes the failure semantics: a season that fails or
+    is cancelled part-way leaves the episodes already merged in ``destination``
+    (a partial season, which must be deleted before a retry) and keeps the
+    scratch of the episodes that were not merged. Failures inside a transfer
+    never leave a half-written stream file behind.
+
+    ``pump`` is called between the transfer's blocks; cancellation is asked from
+    ``runner.cancelled`` the same way, so a GUI caller can pass
+    ``QCoreApplication.processEvents`` and keep its window painting (and its
+    Cancel button clickable) through a multi-GB copy.
     """
     plans = tuple(plans)
     if not plans:
@@ -656,31 +668,44 @@ def execute_season(
     for plan in plans:
         plan.temp_dir.mkdir(parents=True, exist_ok=True)
 
-    weights = [len(plan.prep_steps) * PREP_STEP_WEIGHT + MUX_WEIGHT for plan in plans]
-    bar = _RunBar(
-        sum(weights) + MERGE_WEIGHT, on_progress=on_progress, on_stage=on_stage
-    )
     count = len(plans)
+    # One merge unit for the season, sliced per episode: each episode carries its
+    # own share of the transfer, which is when that share is spent.
+    transfer_share = MERGE_WEIGHT / count
+    weights = [
+        len(plan.prep_steps) * PREP_STEP_WEIGHT + MUX_WEIGHT + transfer_share
+        for plan in plans
+    ]
+    bar = _RunBar(sum(weights), on_progress=on_progress, on_stage=on_stage)
     warnings: list[str] = []
     details: list[str] = []
     mux_outputs: list[str] = []
+    builder = SeasonBuilder(
+        root,
+        # A kept temp directory means the caller wants the staged trees to
+        # survive, so the merge has to copy instead of consuming them.
+        move=not keep_temp_on_success,
+        should_cancel=lambda: runner.cancelled,
+        pump=pump,
+    )
 
     try:
         base = 0.0
         for index, (plan, weight) in enumerate(zip(plans, weights, strict=True), start=1):
             prefix = f"episode {index}/{count}: "
+            transfer_base = base + weight - transfer_share
             mux_result = _mux_one(
                 plan,
                 runner,
                 bar=bar,
                 base=base,
-                weight=weight,
+                weight=weight - transfer_share,
                 ffprobe=ffprobe,
                 on_line=on_line,
                 prefix=prefix,
             )
             mux_outputs.append(mux_result.output)
-            base += weight
+            base = transfer_base
 
             # Verify the episode on its own staging tree, before the merge: the
             # merge only renumbers names and playlist references (season.py), so
@@ -697,21 +722,28 @@ def execute_season(
             warnings.extend(report.warnings)
             details.extend(report.details)
 
-        if runner.cancelled:
-            raise JobCancelled("merging the season")
-        bar.announce("merge", f"merging {count} episodes into one AVCHD folder")
-        bar.phase(0.0, base, MERGE_WEIGHT)
-        merged = merge_avchd_trees(
-            # Each episode's mux destination *is* a one-title tree: tsMuxeR
-            # writes BDMV/ directly into it.
-            [plan.output_dir for plan in plans],
-            root,
-            # A kept temp directory means the caller wants the staged trees to
-            # survive, so the merge has to copy instead of consuming them.
-            move=not keep_temp_on_success,
-            on_progress=lambda value: bar.phase(value, base, MERGE_WEIGHT),
-        )
-        bar.phase(1.0, base, MERGE_WEIGHT)
+            # Hand the verified episode to the season folder right away, then
+            # drop its scratch files — that is what keeps the staging area at
+            # about one episode while the rest of the season is still unwritten
+            # (D29). A kept temp directory keeps them all instead.
+            if runner.cancelled:
+                raise JobCancelled(f"{prefix}merging into the season folder")
+            bar.announce(
+                "merge", f"{prefix}merging into the season folder", index, count
+            )
+            bar.phase(0.0, transfer_base, transfer_share)
+            builder.add(
+                plan.output_dir,
+                on_progress=lambda value, start=transfer_base: bar.phase(
+                    value, start, transfer_share
+                ),
+            )
+            bar.phase(1.0, transfer_base, transfer_share)
+            base += transfer_share
+            if not keep_temp_on_success:
+                _clean_episode_temp(plan)
+
+        merged = builder.finish()
 
         renamed = rename_tree_for_usb(root)
         if renamed and on_line is not None:
@@ -774,6 +806,18 @@ def _clean_season_temp(
     for plan in plans:
         _clean_temp(plan, owned=False)
         shutil.rmtree(plan.output_dir, ignore_errors=True)
+
+
+def _clean_episode_temp(plan: JobPlan) -> None:
+    """Drop one episode's scratch files once its tree is in the season folder.
+
+    By then the tree itself is empty (the merge moved its files), and the files
+    the plan wrote next to it — meta file, prepared streams — are not needed any
+    more. Cleaning per episode instead of all at the end is what keeps a
+    season's temp footprint at about one episode (D29).
+    """
+    _clean_temp(plan, owned=False)
+    shutil.rmtree(plan.output_dir, ignore_errors=True)
 
 
 def run_prep_step(

@@ -8,6 +8,13 @@ cancellation works — the Cancel button's click *is* delivered while
 the running child, and the unwinding surfaces as ``cancelled`` instead of as a
 tool error.
 
+The one long stretch that no child process covers is a season's merge: moving
+the episodes into the season folder is the application's own file I/O and runs on
+this thread. ``start_season`` therefore passes
+``QCoreApplication.processEvents`` down as the merge's ``pump``, which the
+transfer loop calls between blocks — the window keeps painting there too, and a
+Cancel click is picked up between two blocks instead of after the whole season.
+
 Two operations are exposed:
 
 ``start_probe``
@@ -586,6 +593,11 @@ class JobRunner(QtCore.QObject):
             on_line=self.line.emit,
             on_progress=self.progress.emit,
             on_stage=self.stage_changed.emit,
+            # The season merge copies whole episodes on this thread; pumping the
+            # event loop between its blocks is what keeps the window painting
+            # and the Cancel button working there (the muxes pump themselves
+            # through QProcessRunner's nested event loop).
+            pump=QtCore.QCoreApplication.processEvents,
             keep_temp_on_success=request.keep_temp_on_success,
             keep_temp_on_failure=request.keep_temp_on_failure,
             owns_temp=True,  # this job created the directory with mkdtemp

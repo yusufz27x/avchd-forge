@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Final
 
 from .validate_types import Issue, ValidationReport
 
@@ -107,6 +108,64 @@ class SeasonMergeError(AvchdForgeError):
     """Episode trees cannot be merged: an input is not a clean single-title tree."""
 
 
+class OutOfSpaceError(AvchdForgeError):
+    """A filesystem has too little room for a step.
+
+    Raised before a step runs when the free-space check cannot fit it
+    (``needed_bytes``/``free_bytes`` are set), or when a running tool reports a
+    full filesystem (``tool``/``returncode``/``output`` are set; ffmpeg reports
+    ENOSPC as exit code 228, which reads as an ffmpeg bug until it is spelled
+    out). Only the caller knows which folder the user should move, so the advice
+    comes from ``hint``.
+    """
+
+    #: Shown when the caller passes no more specific advice.
+    DEFAULT_HINT: Final[str] = (
+        "Free space on that filesystem, or point the job at a folder with room, "
+        "and retry."
+    )
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        needed_bytes: int | None = None,
+        free_bytes: int | None = None,
+        tool: str = "",
+        returncode: int | None = None,
+        output: str = "",
+        hint: str = "",
+    ) -> None:
+        from .drives import format_size  # local: only the message needs it
+
+        self.path = Path(path)
+        self.needed_bytes = needed_bytes
+        self.free_bytes = free_bytes
+        self.tool = tool
+        self.returncode = returncode
+        self.output = output
+        self.hint = hint
+
+        headline = f"Not enough free space in {self.path}"
+        if needed_bytes is not None and free_bytes is not None:
+            headline += (
+                f": about {format_size(needed_bytes)} is needed and "
+                f"{format_size(free_bytes)} is free"
+            )
+        elif free_bytes is not None:
+            headline += f": only {format_size(free_bytes)} is free"
+        lines = [headline + "."]
+        if tool:
+            ran_out = f"{tool} ran out of space while writing its output"
+            if returncode is not None:
+                ran_out += f" (exit code {returncode})"
+            lines.append(ran_out + ".")
+        if output.strip():
+            lines.append(f"Output (tail):\n{_last_lines(output, 3)}")
+        lines.append(hint or self.DEFAULT_HINT)
+        super().__init__("\n".join(lines))
+
+
 class PrepError(ToolExecutionError):
     """An ffmpeg preparation step (core extraction, subtitle conversion) failed."""
 
@@ -175,6 +234,7 @@ __all__ = [
     "JobCancelled",
     "MuxError",
     "NavigationDataError",
+    "OutOfSpaceError",
     "PlanError",
     "PrepError",
     "ProbeError",

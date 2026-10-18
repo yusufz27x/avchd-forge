@@ -9,14 +9,17 @@ libbluray's title table — is covered by ``tests/test_e2e.py``.
 
 from __future__ import annotations
 
+import errno
 import struct
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from avchdforge.bdmv import parse_index, parse_movie_objects, play_playlist
-from avchdforge.errors import SeasonMergeError
-from avchdforge.season import merge_avchd_trees
+from avchdforge.errors import JobCancelled, OutOfSpaceError, SeasonMergeError
+from avchdforge.season import SeasonBuilder, merge_avchd_trees
 
 TREE_DIRS = (
     "PLAYLIST",
@@ -216,6 +219,157 @@ def test_merge_reports_stream_byte_progress(tmp_path):
 
     merge_avchd_trees(sources, tmp_path / "season", on_progress=progress.append)
 
-    # Four 69-byte stream parts in two episodes: the first episode's tree lands
-    # verbatim (one step), the second episode reports part by part.
-    assert progress == [pytest.approx(value) for value in (0.5, 0.75, 1.0)]
+    # Four 69-byte stream parts in two episodes: a stream is reported block by
+    # block, so the batch's fraction climbs one part at a time (0.25 … 1.0).
+    assert progress == [pytest.approx(value) for value in (0.25, 0.5, 0.75, 1.0)]
+
+
+# --------------------------------------------------------------------------
+# the incremental builder: one episode at a time, interruptible transfers
+# --------------------------------------------------------------------------
+
+
+def cancels_after(count: int) -> Callable[[], bool]:
+    """A ``should_cancel`` that says no ``count`` times and yes after that."""
+    left = count
+
+    def check() -> bool:
+        nonlocal left
+        left -= 1
+        return left < 0
+
+    return check
+
+
+def counting_pump(ticks: list[int]) -> Callable[[], None]:
+    """A ``pump`` that records every call — how many turns the caller got."""
+    def pump() -> None:
+        ticks.append(0)
+
+    return pump
+
+
+def test_builder_adds_episodes_one_at_a_time(tmp_path):
+    """Progress restarts per episode, and navigation waits for ``finish``."""
+    first = make_episode_tree(tmp_path / "episode1", parts=2)
+    second = make_episode_tree(tmp_path / "episode2", parts=1)
+    progress: list[float] = []
+    builder = SeasonBuilder(tmp_path / "season")
+
+    assert builder.add(first, on_progress=progress.append) == 0
+    assert builder.add(second, on_progress=progress.append) == 2
+    # Until finish() writes the navigation, the tree has no index.bdmv at all.
+    assert not (tmp_path / "season/BDMV/index.bdmv").exists()
+
+    merged = builder.finish()
+
+    assert merged.playlists == (0, 2)
+    assert merged.title_count == 2
+    index = parse_index((tmp_path / "season/BDMV/index.bdmv").read_bytes())
+    assert [title.id_ref for title in index.titles] == [0, 1]
+    # Episode 1 (two parts) reports 0.5 then 1.0; episode 2 (one part) reports 1.0.
+    assert progress == [pytest.approx(value) for value in (0.5, 1.0, 1.0)]
+
+
+def test_builder_transfers_a_stream_block_by_block(tmp_path, monkeypatch):
+    """A stream copy is a loop of blocks, each one giving the caller a turn.
+
+    That loop is what lets the GUI paint and offer a working Cancel through a
+    multi-GB transfer that would otherwise block the thread (D29).
+    """
+    monkeypatch.setattr("avchdforge.season.TRANSFER_BLOCK", 16)
+    source = make_episode_tree(tmp_path / "episode", parts=1)  # 69-byte part
+    progress: list[float] = []
+    ticks: list[int] = []
+    builder = SeasonBuilder(tmp_path / "season", pump=counting_pump(ticks))
+
+    builder.add(source, on_progress=progress.append)
+
+    # 69 bytes in 16-byte blocks: five reads, five reports, five pump calls.
+    assert len(progress) == 5
+    assert len(ticks) == 5
+    assert progress[0] == pytest.approx(16 / 69)
+    assert progress == sorted(progress)
+    assert progress[-1] == 1.0
+
+
+def test_builder_pumps_per_file_when_it_moves(tmp_path):
+    """A same-filesystem move is a rename per file: no blocks, one report each."""
+    source = make_episode_tree(tmp_path / "episode", parts=2)
+    progress: list[float] = []
+    ticks: list[int] = []
+    builder = SeasonBuilder(
+        tmp_path / "season", move=True, pump=counting_pump(ticks)
+    )
+
+    builder.add(source, on_progress=progress.append)
+
+    assert progress == [pytest.approx(0.5), pytest.approx(1.0)]
+    assert len(ticks) == 2
+    assert not (source / "BDMV/STREAM/00000.m2ts").exists()
+
+
+def test_builder_stops_a_transfer_that_is_cancelled(tmp_path, monkeypatch):
+    monkeypatch.setattr("avchdforge.season.TRANSFER_BLOCK", 16)
+    source = make_episode_tree(tmp_path / "episode", parts=1)
+    builder = SeasonBuilder(tmp_path / "season", should_cancel=cancels_after(3))
+
+    with pytest.raises(JobCancelled):
+        builder.add(source)
+
+    # The half-written stream is gone — a partial clip is a trap, not evidence —
+    # and the source part is still complete for a retry.
+    assert list((tmp_path / "season/BDMV/STREAM").iterdir()) == []
+    assert (source / "BDMV/STREAM/00000.m2ts").is_file()
+
+
+def test_builder_validates_an_episode_before_its_bytes_are_written(tmp_path):
+    good = make_episode_tree(tmp_path / "episode1", parts=1)
+    bad = make_episode_tree(tmp_path / "episode2", parts=1)
+    (bad / "BDMV/STREAM/00000.m2ts").unlink()
+    builder = SeasonBuilder(tmp_path / "season", move=True)
+
+    builder.add(good)
+    with pytest.raises(SeasonMergeError, match="CLIPINF and STREAM do not match"):
+        builder.add(bad)
+
+    # Episode 1 is in place; the bad episode was refused before any of its files
+    # were taken away, so fixing the tree is enough to retry.
+    assert (tmp_path / "season/BDMV/STREAM/00000.m2ts").is_file()
+    assert (bad / "BDMV/CLIPINF/00000.clpi").is_file()
+
+
+def test_builder_reports_a_full_destination_by_name(tmp_path, monkeypatch):
+    """A write that runs out of space says so, instead of raising raw OSError."""
+    source = make_episode_tree(tmp_path / "episode", parts=1)
+    destination = tmp_path / "season"
+    real_open = Path.open
+
+    class FullFile:
+        """A file whose writes hit ENOSPC, like a filesystem with no room left."""
+
+        def __init__(self, handle: Any) -> None:
+            self._handle = handle
+
+        def __enter__(self) -> FullFile:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            self._handle.close()
+
+        def write(self, data: bytes) -> int:
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+    def full_open(self: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        handle = real_open(self, mode, *args, **kwargs)
+        return FullFile(handle) if "w" in mode else handle
+
+    monkeypatch.setattr(Path, "open", full_open)
+    builder = SeasonBuilder(destination)
+
+    with pytest.raises(OutOfSpaceError, match="Not enough free space"):
+        builder.add(source)
+
+    # The half-written stream is gone, and the source part is still complete.
+    assert list((destination / "BDMV/STREAM").iterdir()) == []
+    assert (source / "BDMV/STREAM/00000.m2ts").is_file()

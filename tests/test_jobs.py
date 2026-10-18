@@ -782,12 +782,14 @@ def test_season_job_muxes_the_episodes_into_one_tree(tmp_path: Path) -> None:
     bdmv = output_dir / "AVCHD" / "BDMV"
     assert (bdmv / "INDEX.BDM").is_file()
     assert (bdmv / "BACKUP/PLAYLIST/00001.MPL").is_file()
-    # every episode is planned before the first mux, then the merge closes the run
+    # every episode is planned before the first mux; each is muxed, verified and
+    # merged before the next one starts, and the merge closes the run
     assert watcher.stage_keys == [
         "plan",
         "plan",
         "mux",
         "verify",
+        "merge",
         "mux",
         "verify",
         "merge",
@@ -840,7 +842,7 @@ def test_season_job_uses_the_per_episode_selections(tmp_path: Path) -> None:
 
 
 def test_season_job_keeps_the_staging_trees_on_failure(tmp_path: Path) -> None:
-    """Episode 1 muxed fine; episode 2 lost a track: the trees stay as evidence."""
+    """Episode 1 muxed fine; episode 2 lost a track: the failed tree stays as evidence."""
     runner = FakeRunner()
     script_season_success(runner, count=1)
     runner.add_stdout(PROBE_JSON_TEXT, match="episode2.mkv")
@@ -862,10 +864,12 @@ def test_season_job_keeps_the_staging_trees_on_failure(tmp_path: Path) -> None:
     failure = watcher.failures[0]
     assert failure.title == "The output failed verification"
     assert failure.temp_dir is not None and failure.temp_dir.is_dir()
-    assert (failure.temp_dir / "episode-001" / "AVCHD" / "BDMV").is_dir()
+    # episode 1 was already merged and its scratch dropped, so only the failed
+    # episode's tree is kept
+    assert not (failure.temp_dir / "episode-001" / "AVCHD").exists()
     assert (failure.temp_dir / "episode-002" / "AVCHD" / "BDMV").is_dir()
-    # nothing was merged into the output folder
-    assert not (tmp_path / "out" / "AVCHD" / "BDMV").exists()
+    # the destination holds the merged episodes — a partial season (D29)
+    assert (tmp_path / "out" / "AVCHD" / "BDMV").is_dir()
 
 
 def test_season_job_refuses_an_existing_tree_before_any_tool_runs(tmp_path: Path) -> None:

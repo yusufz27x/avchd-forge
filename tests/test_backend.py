@@ -887,6 +887,7 @@ def test_execute_season_muxes_each_episode_and_merges_the_trees(tmp_path: Path) 
     script_season(runner)
     stages: list[JobStage] = []
     progress: list[float | None] = []
+    ticks: list[int] = []
 
     outcome = execute_season(
         plans,
@@ -894,6 +895,7 @@ def test_execute_season_muxes_each_episode_and_merges_the_trees(tmp_path: Path) 
         destination=destination,
         on_stage=stages.append,
         on_progress=progress.append,
+        pump=lambda: ticks.append(0),
         owns_temp=True,
     )
 
@@ -915,9 +917,11 @@ def test_execute_season_muxes_each_episode_and_merges_the_trees(tmp_path: Path) 
         "tsMuxeR",
         "ffprobe",
     ]
+    # Each episode is verified and then merged before the next one is muxed.
     assert [stage.key for stage in stages] == [
         "mux",
         "verify",
+        "merge",
         "mux",
         "verify",
         "merge",
@@ -929,6 +933,14 @@ def test_execute_season_muxes_each_episode_and_merges_the_trees(tmp_path: Path) 
         "episode 1/2: muxing episode1.mkv",
         "episode 2/2: muxing episode2.mkv",
     ]
+    merge_labels = [stage.label for stage in stages if stage.key == "merge"]
+    assert merge_labels == [
+        "episode 1/2: merging into the season folder",
+        "episode 2/2: merging into the season folder",
+    ]
+    # The transfer hands the caller's loop a turn once per stream file (per
+    # block when a real file needs several).
+    assert len(ticks) == 2
     assert not staging.exists()
     values = [value for value in progress if value is not None]
     assert values == sorted(values)
@@ -967,9 +979,13 @@ def test_execute_season_refuses_an_episode_with_a_dropped_track(tmp_path: Path) 
     with pytest.raises(VerificationError, match="subtitle streams"):
         execute_season(plans, runner, destination=destination, owns_temp=True)
 
-    # Episode 1 was staged, but nothing was merged into the destination.
-    assert not (destination / "BDMV").exists()
-    assert (plans[0].output_dir / "BDMV/index.bdmv").is_file()
+    # Episode 1 was verified and merged before episode 2 lost its track, so the
+    # destination holds episode 1 alone — a partial season, deleted before a
+    # retry — while the failed episode's tree stays as evidence (D29).
+    bdmv = destination / "BDMV"
+    assert (bdmv / "PLAYLIST/00000.mpls").is_file()
+    assert not (bdmv / "PLAYLIST/00001.mpls").exists()
+    assert not plans[0].output_dir.exists()  # merged, and its scratch dropped
     assert (plans[1].output_dir / "BDMV/index.bdmv").is_file()
 
 
@@ -989,6 +1005,34 @@ def test_execute_season_cancellation_keeps_the_staged_trees(tmp_path: Path) -> N
 
     assert excinfo.value.stage == "episode 1/2: verifying"
     assert not (destination / "BDMV").exists()
+    assert (plans[0].output_dir / "BDMV/STREAM/00000.m2ts").is_file()
+
+
+def test_execute_season_can_be_cancelled_while_an_episode_is_merged(tmp_path: Path) -> None:
+    plans = [season_plan(tmp_path, 1), season_plan(tmp_path, 2)]
+    destination = tmp_path / "out" / "AVCHD"
+    runner = FakeRunner()
+    script_season(runner)
+
+    def cancel_on_merge(stage: JobStage) -> None:
+        # The cancel lands as episode 1's transfer is announced, i.e. while the
+        # GUI would be inside the copy loop with the Cancel button live.
+        if stage.key == "merge":
+            runner.cancelled = True
+
+    with pytest.raises(JobCancelled) as excinfo:
+        execute_season(
+            plans,
+            runner,
+            destination=destination,
+            on_stage=cancel_on_merge,
+            owns_temp=True,
+        )
+
+    assert excinfo.value.stage == "copying to the season folder"
+    # The transfer stopped before the first stream: nothing half-written in the
+    # destination, and the episode's staged tree is whole for a retry.
+    assert list((destination / "BDMV/STREAM").iterdir()) == []
     assert (plans[0].output_dir / "BDMV/STREAM/00000.m2ts").is_file()
 
 

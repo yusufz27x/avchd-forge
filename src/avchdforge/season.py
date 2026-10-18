@@ -4,32 +4,43 @@ tsMuxeR cannot write more than one title into a tree: every mux starts its
 clip numbers at ``00000`` again and its ``index.bdmv`` carries a single title
 table entry. A PS3, however, only mounts one AVCHD folder per USB drive
 (``docs/CONTEXT.md`` §2.11), so the episodes have to live side by side in one
-``BDMV`` folder. This module builds that folder:
+``BDMV`` folder. This module builds that folder, one episode at a time
+(:class:`SeasonBuilder`):
 
-1. the first episode's tree is copied as it is;
-2. every later episode's clips, clip information and playlists are renamed
-   above the numbers already used and the clip references inside its ``.mpls``
-   files are retargeted — ``.clpi`` files carry no name of their own, and
-   chapter marks keep pointing inside their own episode;
-3. ``index.bdmv`` and ``MovieObject.bdmv`` are rebuilt for one title per
+1. an episode's clips, clip information and playlists are renamed above the
+   numbers already used and the clip references inside its ``.mpls`` files are
+   retargeted — ``.clpi`` files carry no name of their own, and chapter marks
+   keep pointing inside their own episode;
+2. ``index.bdmv`` and ``MovieObject.bdmv`` are rebuilt for one title per
    episode by :func:`avchdforge.bdmv.season_navigation`, in ``BDMV/`` and in
-   ``BDMV/BACKUP/``.
+   ``BDMV/BACKUP/``, once the last episode is in.
 
 The result is what :func:`avchdforge.backend.rename_tree_for_usb` and
 :func:`avchdforge.backend.check_output_tree` expect: a folder holding ``BDMV``.
 Everything here is pure filesystem work — no subprocess, no Qt.
 
-Every source is validated before the first byte is written: a tree that is not
-exactly what tsMuxeR writes for one episode fails the merge while the
-destination is still empty, so a half-merged season can never block a retry.
-``move=True`` consumes the source trees (``shutil.move``): on one filesystem
-that is a rename per file, which is how a season run that stages its muxes on
-the target drive avoids writing every episode twice; across filesystems it
-degrades to a copy and a delete, never to an error.
+``move=True`` consumes the source trees: on one filesystem a renamed file, which
+is how a season run that stages its muxes on the target drive avoids writing
+every episode twice; across filesystems a copy and a delete, never an error.
+Copies run in :data:`TRANSFER_BLOCK` blocks and hand control back between blocks
+(``should_cancel``, ``pump``), so a caller on the GUI thread can keep painting
+and offer a working Cancel through a multi-GB transfer (D29); an interrupted
+transfer removes its half-written destination file and leaves the source intact.
+A season run stages one episode at a time — ``backend.execute_season`` adds each
+episode as soon as its own tree is verified and cleans that episode's scratch
+files away — so the temp directory holds about one episode, not the whole season.
+
+:func:`merge_avchd_trees` merges a whole batch at once on top of
+:class:`SeasonBuilder`; it validates every source before the first byte is
+written, which is what callers that can afford to stage the batch want (a failed
+merge then leaves the destination empty, so it cannot block a retry). The
+builder itself validates one episode at a time, before that episode's bytes.
 """
 
 from __future__ import annotations
 
+import errno
+import os
 import re
 import shutil
 from collections.abc import Callable, Sequence
@@ -38,7 +49,8 @@ from pathlib import Path
 from typing import Final
 
 from .bdmv import season_navigation
-from .errors import SeasonMergeError
+from .drives import free_bytes
+from .errors import JobCancelled, OutOfSpaceError, SeasonMergeError
 
 BDMV_DIR: Final[str] = "BDMV"
 PLAYLIST_DIR: Final[str] = "PLAYLIST"
@@ -49,6 +61,12 @@ BACKUP_DIR: Final[str] = "BACKUP"
 #: Clip names are five ASCII digits followed by the stream's codec identifier
 #: (``00000M2TS``) wherever a playlist names a clip.
 _CLIP_REFERENCE: Final[re.Pattern[bytes]] = re.compile(rb"(\d{5})M2TS")
+
+#: Bytes per read/write block of a transfer. Big enough that a drive stays
+#: saturated (a season is tens of GB and device-bound), small enough that the
+#: caller can pump its event loop and notice a cancellation between blocks: a
+#: copied season spends minutes inside that loop on the GUI thread otherwise.
+TRANSFER_BLOCK: Final[int] = 4 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -74,8 +92,10 @@ def merge_avchd_trees(
     *,
     move: bool = False,
     on_progress: Callable[[float], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    pump: Callable[[], None] | None = None,
 ) -> MergedSeason:
-    """Merge single-title trees into ``destination/BDMV``.
+    """Merge single-title trees into ``destination/BDMV`` — the whole batch at once.
 
     ``sources`` are folders that contain a lowercase (pre-USB-rename) ``BDMV``
     tree as tsMuxeR writes it, one per episode, in episode order. ``destination``
@@ -87,61 +107,139 @@ def merge_avchd_trees(
     share of the episodes' stream bytes put in place (the streams dominate the
     data; the playlists and clip info files that ride along are ignored in both
     the numerator and the denominator).
+
+    A caller that cannot stage the whole batch up front — a GUI season run of
+    tens of GB, which must not hold the whole season in temp — uses
+    :class:`SeasonBuilder` and adds each episode as it is ready instead.
     """
     sources = [Path(source) for source in sources]
     if not sources:
         raise SeasonMergeError("no episode trees to merge")
-    destination = Path(destination)
-    if destination.exists() and any(destination.iterdir()):
-        raise SeasonMergeError(f"{destination} is not empty — merging would mix two trees together")
+    episodes = [
+        _validate_tree(source, number) for number, source in enumerate(sources, start=1)
+    ]
+    sizes = [float(episode.stream_bytes) for episode in episodes]
+    total = sum(sizes)
 
-    episodes: list[_EpisodeTree] = []
-    playlists: list[int] = []
-    next_number = 0
-    for number, source in enumerate(sources, start=1):
-        bdmv = source / BDMV_DIR
-        _check_single_title_tree(bdmv, source, number)
-        stems = _clip_stems(bdmv, source)
-        _check_playlist_references(bdmv, stems)
-        episodes.append(_EpisodeTree(bdmv=bdmv, stems=stems))
+    moved = 0.0
+    current = 0.0
+
+    def report(fraction: float) -> None:
+        if on_progress is not None:
+            on_progress(min((moved + fraction * current) / total, 1.0) if total else 1.0)
+
+    builder = SeasonBuilder(
+        destination,
+        move=move,
+        should_cancel=should_cancel,
+        pump=pump,
+    )
+    for episode, size in zip(episodes, sizes, strict=True):
+        current = size
+        builder._add_validated(episode, on_progress=report)
+        moved += size
+    return builder.finish()
+
+
+class SeasonBuilder:
+    """Build one multi-title tree out of single-title episode trees, one at a time.
+
+    ``backend.execute_season`` adds each episode right after its own tree was
+    muxed and verified, so a season run stages about one episode instead of the
+    whole season (D29) — and each episode is validated when it is added, so a
+    bad tree still fails before *its* bytes are written. ``finish`` writes the
+    season's navigation files (``index.bdmv``/``MovieObject.bdmv``, root and
+    ``BACKUP``) and returns the merged tree.
+
+    ``on_progress`` (given per :meth:`add`) receives the share of that episode's
+    stream bytes put in place, so a caller can map it onto per-episode progress;
+    ``should_cancel`` is asked between transfer blocks and ``pump`` is called
+    after each one. With ``move`` the episode's files are consumed as they land.
+    """
+
+    def __init__(
+        self,
+        destination: Path,
+        *,
+        move: bool = False,
+        should_cancel: Callable[[], bool] | None = None,
+        pump: Callable[[], None] | None = None,
+    ) -> None:
+        self._destination = Path(destination)
+        if self._destination.exists() and any(self._destination.iterdir()):
+            raise SeasonMergeError(
+                f"{self._destination} is not empty — merging would mix two trees together"
+            )
+        self._move = move
+        self._should_cancel = should_cancel
+        self._pump = pump
+        self._episodes: list[_EpisodeTree] = []
+        self._playlists: list[int] = []
+
+    def add(
+        self, tree: Path, *, on_progress: Callable[[float], None] | None = None
+    ) -> int:
+        """Validate one episode tree and transfer it; returns its playlist number.
+
+        ``tree`` is the folder tsMuxeR wrote ``BDMV/`` into, as
+        :func:`merge_avchd_trees` takes it. The episode gets the next clip
+        numbers, and its playlist references are retargeted to them.
+        """
+        source = Path(tree)
+        return self._add_validated(
+            _validate_tree(source, len(self._playlists) + 1), on_progress=on_progress
+        )
+
+    def _add_validated(
+        self,
+        episode: _EpisodeTree,
+        *,
+        on_progress: Callable[[float], None] | None = None,
+    ) -> int:
+        """Transfer an already validated episode tree; returns its playlist number."""
         # A playlist's number is the number of the episode's first clip, which is
         # also the playlist tsMuxeR itself wrote for the episode (one per mux).
-        playlists.append(next_number)
-        next_number += len(stems)
+        playlist = sum(len(episode.stems) for episode in self._episodes)
+        # The episode's own stream bytes set the progress scale; measure them
+        # before the transfer — ``move`` takes the sources away.
+        total = episode.stream_bytes
+        done = 0
 
-    destination.mkdir(parents=True, exist_ok=True)
-    target = destination / BDMV_DIR
-    total_bytes = sum(
-        path.stat().st_size for episode in episodes for path in episode.streams
-    )
-    moved_bytes = 0
+        def report(amount: int) -> None:
+            nonlocal done
+            done += amount
+            if on_progress is not None:
+                on_progress(min(done / total, 1.0) if total else 1.0)
 
-    def report(amount: int) -> None:
-        nonlocal moved_bytes
-        moved_bytes += amount
-        if on_progress is not None:
-            on_progress(min(moved_bytes / total_bytes, 1.0) if total_bytes else 1.0)
+        self._episodes.append(episode)
+        self._playlists.append(playlist)
+        _copy_renumbered(
+            episode.bdmv,
+            self._destination / BDMV_DIR,
+            offset=playlist,
+            stems=episode.stems,
+            move=self._move,
+            on_stream=report,
+            should_cancel=self._should_cancel,
+            pump=self._pump,
+        )
+        return playlist
 
-    for number, episode in enumerate(episodes):
-        if number == 0:
-            # The first episode's tree is the base of the merged one and lands
-            # verbatim, so the single-title case keeps tsMuxeR's own bytes.
-            # Measure before the transfer — ``move`` takes the source away.
-            size = sum(path.stat().st_size for path in episode.streams)
-            _transfer_tree(episode.bdmv, target, move=move)
-            report(size)
-        else:
-            _copy_renumbered(
-                episode.bdmv,
-                target,
-                offset=playlists[number],
-                stems=episode.stems,
-                move=move,
-                on_stream=report,
-            )
+    def finish(self) -> MergedSeason:
+        """Write the season's navigation files and return the merged tree."""
+        if not self._playlists:
+            raise SeasonMergeError("no episode trees to merge")
+        _write_navigation(self._destination / BDMV_DIR, self._playlists)
+        return MergedSeason(root=self._destination, playlists=tuple(self._playlists))
 
-    _write_navigation(target, playlists)
-    return MergedSeason(root=destination, playlists=tuple(playlists))
+
+def _validate_tree(tree: Path, episode: int) -> _EpisodeTree:
+    """Check that ``tree`` is exactly what tsMuxeR writes for one episode."""
+    bdmv = tree / BDMV_DIR
+    _check_single_title_tree(bdmv, tree, episode)
+    stems = _clip_stems(bdmv, tree)
+    _check_playlist_references(bdmv, stems)
+    return _EpisodeTree(bdmv=bdmv, stems=stems)
 
 
 @dataclass(frozen=True)
@@ -154,6 +252,10 @@ class _EpisodeTree:
     @property
     def streams(self) -> tuple[Path, ...]:
         return tuple(self.bdmv / STREAM_DIR / f"{stem:05d}.m2ts" for stem in self.stems)
+
+    @property
+    def stream_bytes(self) -> int:
+        return sum(path.stat().st_size for path in self.streams)
 
 
 def _check_single_title_tree(bdmv: Path, source: Path, episode: int) -> None:
@@ -235,17 +337,30 @@ def _copy_renumbered(
     stems: Sequence[int],
     move: bool = False,
     on_stream: Callable[[int], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    pump: Callable[[], None] | None = None,
 ) -> None:
     """Copy one episode's tree, shifting every number by ``offset``."""
     mapping = {stem: stem + offset for stem in stems}
+    for directory in (
+        PLAYLIST_DIR,
+        CLIPINF_DIR,
+        STREAM_DIR,
+        f"{BACKUP_DIR}/{PLAYLIST_DIR}",
+        f"{BACKUP_DIR}/{CLIPINF_DIR}",
+    ):
+        (destination / directory).mkdir(parents=True, exist_ok=True)
     for stem, path in _numbered(source / CLIPINF_DIR, ".clpi").items():
         _transfer(path, destination / CLIPINF_DIR / f"{mapping[stem]:05d}.clpi", move=move)
     for stem, path in _numbered(source / STREAM_DIR, ".m2ts").items():
-        # Measure before the transfer: with ``move`` the source file is gone after.
-        size = path.stat().st_size
-        _transfer(path, destination / STREAM_DIR / f"{mapping[stem]:05d}.m2ts", move=move)
-        if on_stream is not None:
-            on_stream(size)
+        _transfer(
+            path,
+            destination / STREAM_DIR / f"{mapping[stem]:05d}.m2ts",
+            move=move,
+            on_block=on_stream,
+            should_cancel=should_cancel,
+            pump=pump,
+        )
     for stem, path in _numbered(source / PLAYLIST_DIR, ".mpls").items():
         (destination / PLAYLIST_DIR / f"{mapping[stem]:05d}.mpls").write_bytes(
             _map_playlist(path, mapping)
@@ -266,25 +381,120 @@ def _copy_renumbered(
             path.unlink()
 
 
-def _transfer(source: Path, destination: Path, *, move: bool) -> None:
-    """Put a clip file in place byte for byte.
+def _transfer(
+    source: Path,
+    destination: Path,
+    *,
+    move: bool,
+    on_block: Callable[[int], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    pump: Callable[[], None] | None = None,
+) -> None:
+    """Put a clip file in place byte for byte, reporting its bytes as they land.
 
     Clip files reference no names of their own, so they need no rewriting; a
     move is a rename on the same filesystem and a copy plus a delete across
-    filesystems, which is exactly ``shutil.move``'s contract.
+    filesystems, which is exactly ``shutil.move``'s contract — except that the
+    copy runs in blocks so a caller can follow it and interrupt it instead of
+    blocking for minutes on a multi-GB file (D29).
     """
-    if move:
-        shutil.move(str(source), str(destination))
-    else:
-        shutil.copy2(source, destination)
+    if should_cancel is not None and should_cancel():
+        raise JobCancelled("copying to the season folder")
+    try:
+        if move:
+            _move_file(
+                source,
+                destination,
+                on_block=on_block,
+                should_cancel=should_cancel,
+                pump=pump,
+            )
+        else:
+            _copy_file(
+                source,
+                destination,
+                on_block=on_block,
+                should_cancel=should_cancel,
+                pump=pump,
+            )
+    except (OutOfSpaceError, JobCancelled):
+        raise
+    except OSError as exc:
+        raise SeasonMergeError(
+            f"could not put {source.name} into {destination}: {exc}"
+        ) from exc
 
 
-def _transfer_tree(source: Path, target: Path, *, move: bool) -> None:
-    """Put the first episode's whole tree — clip files, playlists and all — in place."""
-    if move:
-        shutil.move(str(source), str(target))
-    else:
-        shutil.copytree(source, target)
+def _move_file(
+    source: Path,
+    destination: Path,
+    *,
+    on_block: Callable[[int], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    pump: Callable[[], None] | None = None,
+) -> None:
+    """Move one file: a rename when the filesystems match, a block copy otherwise.
+
+    ``os.replace`` is tried first on purpose — on one filesystem the season
+    transfer is then a rename per file, however large the clips — and only a
+    genuine cross-device error falls back to the blockwise copy plus delete.
+    """
+    size = source.stat().st_size
+    try:
+        os.replace(source, destination)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        _copy_file(
+            source,
+            destination,
+            on_block=on_block,
+            should_cancel=should_cancel,
+            pump=pump,
+        )
+        source.unlink()
+        return
+    if on_block is not None:
+        on_block(size)
+    if pump is not None:
+        pump()
+
+
+def _copy_file(
+    source: Path,
+    destination: Path,
+    *,
+    on_block: Callable[[int], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    pump: Callable[[], None] | None = None,
+) -> None:
+    """Copy one file in blocks, giving the caller's loop a turn between them."""
+    try:
+        with source.open("rb") as src, destination.open("wb") as dst:
+            while True:
+                if should_cancel is not None and should_cancel():
+                    raise JobCancelled("copying to the season folder")
+                block = src.read(TRANSFER_BLOCK)
+                if not block:
+                    break
+                dst.write(block)
+                if on_block is not None:
+                    on_block(len(block))
+                if pump is not None:
+                    pump()
+        shutil.copystat(source, destination)
+    except OSError as exc:
+        # A half-written file is not evidence, it is a trap (and on a full disk
+        # the space is better handed back); the source is complete either way.
+        destination.unlink(missing_ok=True)
+        if exc.errno == errno.ENOSPC:
+            raise OutOfSpaceError(
+                destination.parent, free_bytes=free_bytes(destination.parent)
+            ) from exc
+        raise
+    except BaseException:
+        destination.unlink(missing_ok=True)
+        raise
 
 
 def _map_playlist(path: Path, mapping: dict[int, int]) -> bytes:
