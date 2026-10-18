@@ -196,11 +196,15 @@ Cancellation kills the running child (not the whole group), marks the result
 A season run (`JobRunner.start_season`, built from a `SeasonRequest`) plans every
 episode first — each into its own scratch folder `<temp>/episode-NNN`, one
 `JobPlan` whose `output_dir` is exactly `<scratch>/AVCHD` — then hands the batch
-to `backend.execute_season`: mux and verify each tree on its own, merge them
-(`season.merge_avchd_trees`, moving rather than copying unless the temp dir is
-kept), one rename to the FAT32 names, one verification of the merged tree, one
-cleanup of the staging root (kept on failure/cancel; `docs/CONTEXT.md` D26/D27).
-The run bar weighs per episode `prep + mux` plus one merge unit.
+to `backend.execute_season`, which works one episode at a time: mux and verify
+that tree on its own, add it to the season folder (`season.SeasonBuilder`, which
+renumbers its clips and playlists; moving rather than copying unless the temp dir
+is kept) and drop its scratch, then the next episode. One rename to the FAT32
+names, one verification of the merged tree and one cleanup of the staging root
+close the run (kept on failure/cancel, holding the episodes not yet merged;
+`docs/CONTEXT.md` D26/D27/D29). The run bar weighs per episode `prep + mux` plus
+its slice of one merge unit, and the episode transfer pumps the GUI's event loop
+between its 4 MiB blocks so the window stays live and cancellable.
 
 Terminal signals (`probed`, `finished`, `failed`, `cancelled`) are emitted *after*
 the runner is released, so a handler may start the next run — the window's probe
@@ -347,16 +351,33 @@ Ordered work:
    `backend.execute_season` muxes each episode into its own scratch tree
    (`<temp>/episode-NNN/AVCHD`), verifies it there, merges with `move=True`
    unless the temp dir is kept, renames once and verifies the merged tree; the
-   run bar weighs per episode `prep + mux` plus one merge unit, and a failure
-   keeps the whole staging root as evidence. Per-episode chapters need nothing
+   run bar weighs per episode `prep + mux` plus one merge unit (the merge's own
+   staging behaviour was reworked in step 3). Per-episode chapters need nothing
    new — each episode's plan carries its own meta text and options. "Add
    episodes to an existing season folder" (the V20 revisit) stays deferred: a
    v1 season refuses an existing tree and never touches one.
-3. **Authored top menu** (only if the console's title search proves unusable) —
+3. **One episode at a time, and a temp-space check** *(done, 2026-10-18)* — the
+   first GUI season run (13 × ~10.6 GiB, temp `/tmp` a 7.6 GiB tmpfs) froze the
+   window for the whole merge and then died with ffmpeg's `228` (ENOSPC).
+   `season.SeasonBuilder` builds the season as each episode's tree is verified,
+   `execute_season` drops that episode's scratch immediately and calls
+   `should_cancel`/`pump` between 4 MiB transfer blocks (`jobs.py` passes
+   `QCoreApplication.processEvents`), so temp holds about one episode and Cancel
+   works during the copy; the bar's single merge unit is sliced across the
+   episodes, keeping its total unchanged. Before each prep/mux,
+   `check_temp_space` compares the plan's own estimate with the free space of
+   `plan.temp_dir` and fails with the folder, the numbers and the Preferences
+   pointer (naming a tmpfs when that is what `/tmp` is); `looks_like_no_space`
+   turns a tool's ENOSPC into the same error. Failure semantics: a season that
+   fails or is cancelled part-way leaves a partial season in the output folder
+   (delete it before a retry) and keeps the scratch of the episodes not merged;
+   `keep_temp_on_success=True` still stages the whole season, so it still needs
+   the room for all of it (D29 of `docs/CONTEXT.md`).
+4. **Authored top menu** (only if the console's title search proves unusable) —
    needs an HDMV/IG compiler, which no open-source tool provides and tsMuxeR
    cannot ingest; the title-table layout from step 1 is unchanged by it, so the
    foundation keeps its value either way.
-4. **Fallback** — one joined title with episode chapter marks (tsMuxeR's join
+5. **Fallback** — one joined title with episode chapter marks (tsMuxeR's join
    syntax is confirmed and `custom_chapters` is wired), losing per-episode
    titles.
 

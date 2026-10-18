@@ -368,14 +368,15 @@ implemented in `avchdforge.bdmv` and `avchdforge.season`:
   tsMuxeR's TopMenu object and object `N+1` its FirstPlay object. With `N = 1`
   the files are byte-identical to tsMuxeR's own — golden fixtures in
   `tests/data/bdmv/`, asserted in `tests/test_bdmv.py`.
-* Merging trees (`season.merge_avchd_trees`) **(verified with real muxes)**: the
-  first episode's tree is copied as is; every later episode's clips, clip
-  information and playlists are shifted above the numbers already used, and the
+* Merging trees (`season.SeasonBuilder`, and `season.merge_avchd_trees` for a
+  whole batch) **(verified with real muxes)**: every episode's clips, clip
+  information and playlists are shifted above the numbers already used — the
+  first episode's shift is zero, so its bytes come out unchanged — and the
   `00000M2TS`-style clip references *inside its `.mpls`* are rewritten. `.clpi`
   files carry no names of their own and are copied untouched; `index.bdmv` and
   `MovieObject.bdmv` are rebuilt for the merged tree, in `BDMV/` and in
-  `BDMV/BACKUP/`. Playlist numbers follow the episodes' first clip numbers, so
-  the episode playlists are `0, n1, n1+n2, …`.
+  `BDMV/BACKUP/`, once the last episode is in. Playlist numbers follow the
+  episodes' first clip numbers, so the episode playlists are `0, n1, n1+n2, …`.
 * Local player check **(verified)**: libbluray's HDMV VM, driven through
   `bd_play` (disc insert) and `bd_play_title 2` ("Go To → Title 2"), reads
   episode 1's clip after insertion and episode 2's after the title search
@@ -414,6 +415,18 @@ uses exactly the tree the feature ships and cannot drift from the GUI path.
   new language priorities in Preferences re-derive the defaults of all of them.
   A file whose probe cannot answer is marked in place and blocks Start; the rest
   of the list is still read.
+* The merge runs **incrementally**: each episode is muxed, verified and moved
+  into the season folder before the next one starts, and that episode's scratch
+  files go with it, so the temp directory holds about one episode instead of the
+  whole season. The transfer copies in 4 MiB blocks and hands control back
+  between them (`should_cancel`, `pump` — `jobs.py` passes
+  `QCoreApplication.processEvents`), so the window keeps painting and Cancel
+  works during the copy; a cancelled or failed transfer removes its half-written
+  file, and the episodes already merged stay in the output folder (a partial
+  season, deleted before a retry). Before each episode's prep and mux, the free
+  space in the temp directory is compared with the plan's own estimate, and a
+  shortfall fails the run with the folder and the numbers — naming a
+  memory-backed tmpfs when the temp folder is one (D29).
 * Offscreen check **(2026-10-18, not console)**: with the real merge and faked
   tools, a 3-episode run reported "Done — 3 titles (3 stream parts) written to
   `<out>/AVCHD`", the window titled "avchd-forge — 3 episodes (season)", and
@@ -456,6 +469,7 @@ uses exactly the tree the feature ships and cannot drift from the GUI path.
 | D26 | 2026-10-18 | Season support starts as **one AVCHD folder, one title per episode**: `bdmv.py` writes the multi-title `index.bdmv`/`MovieObject.bdmv` (episode objects `0..N-1`, tsMuxeR's TopMenu object `N`, its FirstPlay object `N+1`), `season.py` merges the per-episode mux trees by renumbering clips, and navigation uses the player's own "Go To → Title X" plus the Top Menu button. Chapters stay inside each episode's playlist; an authored HDMV/IG top menu is deferred, and one joined title + chapters is kept as the fallback. The single-title case must stay byte-identical to tsMuxeR's own files (`N = 1` golden fixtures), and the feature is **PS3-verified** (2026-10-18, §2.13: the console listed the tree, played episode 1 on insert, reached episode 2 via "Go To → Title 2", and restarted title 1 from the Top Menu button). Work order: foundation + console spike first (both done; the spike also confirmed the D22 rename), GUI integration next — landed 2026-10-18 as D27 (§2.14, `docs/IMPLEMENTATION_PLAN.md` §6) | "Go To → Title X" is documented for AVCHD players (Sony's TS3 manual) and needs no graphics, so the no-transcode rule keeps zero exceptions; an authored menu needs an HDMV/IG compiler that no open-source tool provides (tsMuxeR cannot ingest IG), and a joined title cannot be addressed per episode at all — the PS3 shows its chapters as one flat list. Checking the console's acceptance of a two-title tree before building any UI avoids designing a season mode around a layout the PS3 refuses |
 | D27 | 2026-10-18 | The source row is an **episode list** (one file per title; list order = title order) and the only input path: exactly one listed file builds a `JobRequest` → `start_job` (the unchanged single-title flow), two or more build a `SeasonRequest` → `start_season` → `backend.execute_season`. Each episode keeps its own `TrackSelection`; probes run one file at a time and a probe that cannot answer marks its row and blocks Start; a batch is sorted with `natural_key` because a drop carries no order of its own; every season plan has `output_dir == temp_dir/AVCHD` under `<temp>/episode-NNN`, the season's chosen folder is checked for V20 once in `_season` before any tool runs, and the run bar weighs per episode `prep + mux` plus one merge unit | a season needs per-episode selections — episode 2's tracks are not episode 1's — and routing the one-file case through the unchanged job path is what keeps D26's byte-identical guarantee meaningful in the GUI. V20 stays refusal-only for v1: "add episodes to an existing season folder" would need in-place renumbering of a tree the app did not write, which is exactly what V20 promises never to do silently |
 | D28 | 2026-10-18 | `JobRunner` releases its runner **before** it emits `probed`, `finished`, `failed` or `cancelled`: the exception is captured, `_end()` runs, then the failure is routed and emitted | the window reads a list of files one probe at a time and starts the next probe from the failure handler, while `start_*` refuses to run while `busy`; emitting first forced every such caller to defer through the event loop (and its tests to spin it), so the ordering is a documented contract instead of an accident of `finally` |
+| D29 | 2026-10-18 | A season is built **one episode at a time** (`season.SeasonBuilder`): `execute_season` muxes, verifies and adds each episode to the season folder, then drops that episode's scratch, so the temp directory holds about one episode instead of the whole season. Transfers run in `TRANSFER_BLOCK = 4 MiB` blocks (a same-filesystem move is still one rename per file) and call `should_cancel`/`pump` between blocks — `jobs.py` passes `QCoreApplication.processEvents`, which is what keeps the window painting and Cancel clickable during the merge — and an interrupted transfer removes its half-written destination file. Failure semantics change with it: a season that fails or is cancelled part-way leaves the episodes already merged in the output folder (a partial season, deleted before a retry) and keeps the scratch of the episodes not merged. `keep_temp_on_success` still means "keep the whole staged season", so that mode still copies and still needs room for all of it. The first episode goes through the same renumbering path with an identity mapping (bytes unchanged), `merge_avchd_trees` stays the batch API with its "validate every source before the first byte" guarantee, and before every episode's prep/mux `check_temp_space` compares `temp_space_needed` (source-sized repaired stream, source-sized staged mux tree when the mux writes into temp, plus `TEMP_HEADROOM = 1 GiB`) with `drives.free_bytes`; a tool's ENOSPC is caught too (`looks_like_no_space`: exit code 228/28 or the usual wordings) and surfaces as `OutOfSpaceError` naming the folder, with a tmpfs call-out when the temp folder is memory-backed and a "Not enough free space" failure title in the UI | the reporter's 13-episode run froze the window for the whole merge — `shutil.move` copies multi-GB clips inline on the GUI thread with no event pumping, so nothing repaints and Cancel is inert until the copy ends (their only way out was the window manager's *Wait*; the earlier `Killed` was Force Quit, not the OOM killer) — and the run then died with ffmpeg's `228`, which is ENOSPC truncated to a byte: their temp directory was `/tmp`, a 7.6 GiB tmpfs, while the run staged all 137.7 GB of muxed episodes there before merging. One-episode staging removes the whole-season footprint, the pump makes the one remaining long copy interruptible, and naming the folder turns "ffmpeg exit 228" into "free space or point Temporary files elsewhere" |
 
 ## 4. Open items
 
@@ -482,3 +496,8 @@ uses exactly the tree the feature ships and cannot drift from the GUI path.
   release (two 40-minute episodes, subtitles, a split episode) has been through
   a season. Per-episode chapters follow from each plan carrying its own meta
   text, but that is reasoning, not a console result.
+* The temp-space check is an estimate (bitrates × duration × `OUTPUT_OVERHEAD`,
+  plus a fixed `TEMP_HEADROOM`), so it can refuse a job that would have just
+  fit, and it cannot see another process filling the drive while the job runs.
+  The reactive ENOSPC translation covers the second half; freeing space and
+  retrying covers the first.
