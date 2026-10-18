@@ -11,6 +11,7 @@ Signals are connected as plain callables and fire synchronously, because
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ import pytest
 pytest.importorskip("PySide6", reason="jobs.py is Qt orchestration")
 pytest.importorskip("pytestqt", reason="the job tests use pytest-qt")
 
+from avchdforge.backend import SeasonOutcome
 from avchdforge.capabilities import FfmpegCapabilities
 from avchdforge.errors import ExistingTreeError, PlanError, ValidationFailed
 from avchdforge.jobs import (
@@ -29,9 +31,11 @@ from avchdforge.jobs import (
     JobRequest,
     JobRunner,
     ProbeOutcome,
+    SeasonRequest,
     build_job_plan,
     describe_media,
     describe_outcome,
+    describe_season_outcome,
 )
 from avchdforge.plan import PlanOptions
 from avchdforge.probe import parse_ffprobe_json
@@ -77,14 +81,20 @@ def output_payload(*streams: dict[str, Any]) -> dict[str, Any]:
 
 
 def fake_tree(output_dir: Path) -> Path:
-    """Write the AVCHD layout tsMuxeR is supposed to produce."""
+    """Write the AVCHD layout tsMuxeR is supposed to produce.
+
+    Faithful enough for the season merge too: the playlist names the episode's
+    own clip (``00000M2TS``) and BACKUP mirrors PLAYLIST and CLIPINF, the way
+    tsMuxeR's real output does.
+    """
     bdmv = output_dir / "BDMV"
-    for name in ("PLAYLIST", "CLIPINF", "STREAM"):
+    for name in ("PLAYLIST", "CLIPINF", "STREAM", "BACKUP/PLAYLIST", "BACKUP/CLIPINF"):
         (bdmv / name).mkdir(parents=True, exist_ok=True)
-    (bdmv / "index.bdmv").write_bytes(b"IDX0200")
-    (bdmv / "MovieObject.bdmv").write_bytes(b"MOBJ0200")
-    (bdmv / "PLAYLIST" / "00000.mpls").write_bytes(b"MPLS0200")
-    (bdmv / "CLIPINF" / "00000.clpi").write_bytes(b"HDMV0200")
+    for base in (bdmv, bdmv / "BACKUP"):
+        (base / "index.bdmv").write_bytes(b"IDX0200")
+        (base / "MovieObject.bdmv").write_bytes(b"MOBJ0200")
+        (base / "PLAYLIST" / "00000.mpls").write_bytes(b"MPLS0200\x00\x50" + b"00000M2TS")
+        (base / "CLIPINF" / "00000.clpi").write_bytes(b"HDMV0200")
     stream = bdmv / "STREAM" / "00000.m2ts"
     stream.write_bytes(b"\x00" * 4096)
     return stream
@@ -661,6 +671,227 @@ def test_describe_outcome_mentions_files_and_split_size(tmp_path: Path) -> None:
     lines = describe_outcome(watcher.outcomes[0])
 
     assert lines[0] == "done: 1 stream part written"
+    assert any("00000.MTS" in line for line in lines)
+    assert any("split at 4096 MB" in line for line in lines)
+
+
+# --------------------------------------------------------------------------
+# season jobs: several episodes, one AVCHD folder
+# --------------------------------------------------------------------------
+
+
+def season_request_for(tmp_path: Path, count: int = 2, **overrides: Any) -> SeasonRequest:
+    sources = []
+    for number in range(1, count + 1):
+        source = tmp_path / f"episode{number}.mkv"
+        source.write_bytes(b"\x00")
+        sources.append(source)
+    values: dict[str, Any] = {
+        "sources": tuple(sources),
+        "output_dir": tmp_path / "out",
+        "selections": (TrackSelection(audio=(1,)),) * count,
+        "temp_dir": tmp_path / "temp",
+    }
+    values.update(overrides)
+    return SeasonRequest(**values)
+
+
+def script_season_success(
+    runner: FakeRunner,
+    *,
+    count: int = 2,
+    streams: Sequence[list[dict[str, Any]]] | None = None,
+) -> None:
+    """Script a whole season: per episode a plan probe, a detection run, a mux, a probe.
+
+    The probes are matched on the episode's file name and the output probes on
+    ``.m2ts`` (the staged trees keep tsMuxeR's lowercase names until the merge),
+    so both episodes' four calls each land on the right scripted answer.
+    ``streams`` overrides what each output probe reports, one list per episode;
+    by default it is the layout an audio-only plan asks for.
+    """
+    for number in range(1, count + 1):
+        runner.add_stdout(PROBE_JSON_TEXT, match=f"episode{number}.mkv")
+        runner.add_stdout(DETECTION, match=f"episode{number}.mkv")
+        runner.add(
+            FakeResponse(
+                stdout=MUX_OK,
+                match="tsmuxer-meta.txt",
+                side_effect=lambda argv: fake_tree(Path(argv[-1])),
+            )
+        )
+        if streams is not None:
+            probe_streams = streams[number - 1]
+        else:
+            probe_streams = [vstream(0), astream(1)]
+        runner.add_stdout(_json(output_payload(*probe_streams)), match=".m2ts")
+
+
+def test_season_job_muxes_the_episodes_into_one_tree(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    script_season_success(runner)
+    job = make_job(runner)
+    watcher = JobWatcher(job)
+    output_dir = tmp_path / "out"
+
+    job.start_season(season_request_for(tmp_path))
+
+    assert watcher.events[-1] == "finished"
+    assert watcher.failures == [] and watcher.cancellations == []
+    outcome = watcher.outcomes[0]
+    assert isinstance(outcome, SeasonOutcome)
+    assert outcome.title_count == 2
+    assert outcome.playlists == (0, 1)
+    assert outcome.root == output_dir / "AVCHD"
+    # the shipped tree is the AVCHD-on-FAT32 flavour, one part per episode
+    assert [path.name for path in outcome.stream_files] == ["00000.MTS", "00001.MTS"]
+    bdmv = output_dir / "AVCHD" / "BDMV"
+    assert (bdmv / "INDEX.BDM").is_file()
+    assert (bdmv / "BACKUP/PLAYLIST/00001.MPL").is_file()
+    # every episode is planned before the first mux, then the merge closes the run
+    assert watcher.stage_keys == [
+        "plan",
+        "plan",
+        "mux",
+        "verify",
+        "mux",
+        "verify",
+        "merge",
+        "verify",
+        "cleanup",
+    ]
+    assert [stage.label for stage in watcher.stages[0:2]] == [
+        f"episode 1/2: {PLAN_STAGE_LABEL}",
+        f"episode 2/2: {PLAN_STAGE_LABEL}",
+    ]
+    muxes = [stage.label for stage in watcher.stages if stage.key == "mux"]
+    assert muxes == ["episode 1/2: muxing episode1.mkv", "episode 2/2: muxing episode2.mkv"]
+    # the log pane summarises the season
+    assert "season of 2 episodes" in watcher.text
+    assert "title 1  playlist 00000  episode1.mkv" in watcher.text
+    assert "title 2  playlist 00001  episode2.mkv" in watcher.text
+    # progress runs from 0 to 1 across episodes, with busy phases for the probes
+    assert watcher.progress[0] == 0.0
+    assert watcher.progress[-1] == 1.0
+    assert None in watcher.progress
+    # the staging root existed only for this run
+    assert list((tmp_path / "temp").iterdir()) == []
+
+
+def test_season_job_uses_the_per_episode_selections(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    script_season_success(
+        runner,
+        streams=[
+            [vstream(0), astream(1, channels=2, channel_layout="stereo")],
+            [vstream(0), astream(1)],
+        ],
+    )
+    job = make_job(runner)
+    watcher = JobWatcher(job)
+
+    job.start_season(
+        season_request_for(
+            tmp_path,
+            selections=(TrackSelection(audio=(2,)), TrackSelection(audio=(1,))),
+        )
+    )
+
+    assert watcher.events[-1] == "finished"
+    outcome = watcher.outcomes[0]
+    assert outcome.plans[0].selection.audio == (2,)
+    assert outcome.plans[1].selection.audio == (1,)
+    assert outcome.plans[0].audio_tracks()[0].index == 2
+    assert outcome.plans[1].audio_tracks()[0].index == 1
+
+
+def test_season_job_keeps_the_staging_trees_on_failure(tmp_path: Path) -> None:
+    """Episode 1 muxed fine; episode 2 lost a track: the trees stay as evidence."""
+    runner = FakeRunner()
+    script_season_success(runner, count=1)
+    runner.add_stdout(PROBE_JSON_TEXT, match="episode2.mkv")
+    runner.add_stdout(DETECTION, match="episode2.mkv")
+    runner.add(
+        FakeResponse(
+            stdout=MUX_OK,
+            match="tsmuxer-meta.txt",
+            side_effect=lambda argv: fake_tree(Path(argv[-1])),
+        )
+    )
+    runner.add_stdout(_json(output_payload(vstream(0))), match=".m2ts")  # audio dropped
+    job = make_job(runner)
+    watcher = JobWatcher(job)
+
+    job.start_season(season_request_for(tmp_path))
+
+    assert watcher.events[-1] == "failed"
+    failure = watcher.failures[0]
+    assert failure.title == "The output failed verification"
+    assert failure.temp_dir is not None and failure.temp_dir.is_dir()
+    assert (failure.temp_dir / "episode-001" / "AVCHD" / "BDMV").is_dir()
+    assert (failure.temp_dir / "episode-002" / "AVCHD" / "BDMV").is_dir()
+    # nothing was merged into the output folder
+    assert not (tmp_path / "out" / "AVCHD" / "BDMV").exists()
+
+
+def test_season_job_refuses_an_existing_tree_before_any_tool_runs(tmp_path: Path) -> None:
+    output = tmp_path / "out"
+    (output / "AVCHD" / "BDMV").mkdir(parents=True)
+    runner = FakeRunner()
+    job = make_job(runner)
+    watcher = JobWatcher(job)
+
+    job.start_season(season_request_for(tmp_path, output_dir=output))
+
+    assert watcher.events[-1] == "failed"
+    failure = watcher.failures[0]
+    assert failure.title == "The output folder cannot be used"
+    # the check runs before the first probe, and an empty temp dir is not evidence
+    assert runner.calls == []
+    assert failure.temp_dir is None
+
+
+def test_season_job_can_be_cancelled_after_the_first_episode(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    script_season_success(runner)
+    job = make_job(runner)
+    watcher = JobWatcher(job)
+
+    def mux_and_cancel(argv: list[str]) -> None:
+        # The mux itself finishes; the cancel arrives as it does, and the season
+        # must notice before episode 2 is planned or merged.
+        fake_tree(Path(argv[-1]))
+        job.cancel()
+
+    runner.responses[2] = FakeResponse(
+        stdout=MUX_OK, match="tsmuxer-meta.txt", side_effect=mux_and_cancel
+    )
+
+    job.start_season(season_request_for(tmp_path))
+
+    assert watcher.events[-1] == "cancelled"
+    assert watcher.failures == [] and watcher.outcomes == []
+    cancellation = watcher.cancellations[0]
+    assert cancellation.stage == "episode 1/2: verifying"
+    # a cancelled season keeps its staging trees whatever the failure policy says
+    assert cancellation.temp_dir is not None
+    assert (cancellation.temp_dir / "episode-001" / "AVCHD" / "BDMV").is_dir()
+    assert not (tmp_path / "out" / "AVCHD" / "BDMV").exists()
+
+
+def test_describe_season_outcome_lists_titles_and_parts(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    script_season_success(runner)
+    job = make_job(runner)
+    watcher = JobWatcher(job)
+
+    job.start_season(season_request_for(tmp_path))
+
+    lines = describe_season_outcome(watcher.outcomes[0])
+
+    assert lines[0] == "done: 2 titles (2 stream parts) written"
+    assert "title 1  playlist 00000  episode1.mkv" in lines[1]
+    assert "title 2  playlist 00001  episode2.mkv" in lines[2]
     assert any("00000.MTS" in line for line in lines)
     assert any("split at 4096 MB" in line for line in lines)
 

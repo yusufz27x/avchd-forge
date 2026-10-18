@@ -36,7 +36,13 @@ from pathlib import Path
 
 from PySide6 import QtCore
 
-from .backend import JobOutcome, JobStage, execute_plan
+from .backend import (
+    JobOutcome,
+    JobStage,
+    SeasonOutcome,
+    execute_plan,
+    execute_season,
+)
 from .drives import existing_tree
 from .errors import (
     AvchdForgeError,
@@ -62,6 +68,10 @@ TEMP_PREFIX = "avchd-forge-"
 
 #: Label of the stage between "probe" and "prepare": the mandatory detection run.
 PLAN_STAGE_LABEL = "reading tsMuxeR track IDs"
+
+#: Stage a season run was cancelled in, for the rare cancellation the run's own
+#: stage checks did not catch (the message then reads "Cancelled the season.").
+SEASON_STAGE_LABEL = "the season"
 
 RunnerFactory = Callable[[], Runner]
 
@@ -185,6 +195,27 @@ class JobRequest:
     keep_temp_on_failure: bool = True
 
 
+@dataclass(frozen=True, slots=True)
+class SeasonRequest:
+    """Everything one season job needs: several episodes, one AVCHD folder.
+
+    ``selections`` runs parallel to ``sources``; a ``None`` entry means "the
+    smart defaults" for that episode (:func:`default_selection`). The whole
+    tuple may be ``None`` for "defaults everywhere" (a season of unknown
+    length probed by another caller).
+    """
+
+    sources: tuple[Path, ...]
+    output_dir: Path
+    selections: tuple[TrackSelection | None, ...] | None = None
+    options: PlanOptions = field(default_factory=PlanOptions)
+    #: ``None`` means the system temp directory.
+    temp_dir: Path | None = None
+    ffprobe: str = "ffprobe"
+    keep_temp_on_success: bool = False
+    keep_temp_on_failure: bool = True
+
+
 # --------------------------------------------------------------------------
 # pure-ish helpers (they only touch ``runner``)
 # --------------------------------------------------------------------------
@@ -255,7 +286,30 @@ def describe_outcome(outcome: JobOutcome) -> list[str]:
         lines.append(f"  split at {outcome.plan.mux.options.split_size_mb} MB for FAT32")
     lines.extend(f"warning: {warning}" for warning in outcome.warnings)
     if outcome.temp_dir_kept:
-        lines.append(f"temp files kept in {outcome.plan.temp_dir}")
+        lines.append(f"temp files kept in {outcome.temp_dir}")
+    return lines
+
+
+def describe_season_outcome(outcome: SeasonOutcome) -> list[str]:
+    """Summary lines for the log pane after a successful season run."""
+    titles = outcome.title_count
+    count = len(outcome.stream_files)
+    lines = [
+        f"done: {titles} title{'s' if titles != 1 else ''} "
+        f"({count} stream part{'s' if count != 1 else ''}) written"
+    ]
+    for index, (plan, playlist) in enumerate(
+        zip(outcome.plans, outcome.playlists, strict=True), start=1
+    ):
+        lines.append(f"  title {index}  playlist {playlist:05d}  {plan.source.name}")
+    for path in outcome.stream_files:
+        lines.append(f"  {path.name}  {_size_label(path)}")
+    if any(plan.splits for plan in outcome.plans):
+        split = next(plan for plan in outcome.plans if plan.splits)
+        lines.append(f"  split at {split.mux.options.split_size_mb} MB for FAT32")
+    lines.extend(f"warning: {warning}" for warning in outcome.warnings)
+    if outcome.temp_dir_kept and outcome.temp_dir is not None:
+        lines.append(f"temp files kept in {outcome.temp_dir}")
     return lines
 
 
@@ -425,6 +479,103 @@ class JobRunner(QtCore.QObject):
             owns_temp=True,  # this job created the directory with mkdtemp
         )
 
+    def start_season(self, request: SeasonRequest) -> None:
+        """Run a whole season: plan every episode, mux, merge, verify, clean up."""
+        sources = tuple(Path(source).expanduser() for source in request.sources)
+        output_dir = Path(request.output_dir).expanduser()
+        if not sources:
+            raise ValueError("a season needs at least one episode")
+        if request.selections is not None and len(request.selections) != len(sources):
+            raise ValueError("one selection per episode, or none at all")
+        runner = self._begin()
+        try:
+            temp_dir = self._make_temp(request.temp_dir)
+        except OSError as exc:
+            self._end()
+            self._emit_failure(exc, temp_dir=None, output_dir=output_dir)
+            return
+
+        self.line.emit(f"[avchd-forge] season of {len(sources)} episodes\n")
+        for source in sources:
+            self.line.emit(f"[avchd-forge] source {source}\n")
+        self.line.emit(f"[avchd-forge] output {output_dir}\n")
+        self.line.emit(f"[avchd-forge] temp   {temp_dir}\n")
+
+        outcome: SeasonOutcome | None = None
+        try:
+            outcome = self._season(request, sources, temp_dir, runner)
+        except Exception as exc:
+            self._route_failure(
+                exc,
+                runner=runner,
+                stage=SEASON_STAGE_LABEL,
+                source=None,
+                output_dir=output_dir,
+                temp_dir=temp_dir,
+                keep_temp=request.keep_temp_on_failure,
+            )
+        finally:
+            self._end()
+        if outcome is not None:
+            for row in describe_season_outcome(outcome):
+                self.line.emit(f"[avchd-forge] {row}\n")
+            self.finished.emit(outcome)
+
+    def _season(
+        self,
+        request: SeasonRequest,
+        sources: tuple[Path, ...],
+        temp_dir: Path,
+        runner: Runner,
+    ) -> SeasonOutcome:
+        """Plan one episode at a time, then hand the batch to the backend."""
+        # The whole run writes one tree; the per-episode plans (and their
+        # probes) would all check the same empty folder, so check it here once,
+        # before any tool runs (V20). The final merge refuses it again.
+        output_dir = Path(request.output_dir).expanduser()
+        marker = existing_tree(output_dir)
+        if marker is not None:
+            raise ExistingTreeError(output_dir, marker)
+
+        plans: list[JobPlan] = []
+        count = len(sources)
+        for index, source in enumerate(sources, start=1):
+            self.stage_changed.emit(
+                JobStage(key="plan", label=f"episode {index}/{count}: {PLAN_STAGE_LABEL}")
+            )
+            # One scratch directory per episode: the mux writes <scratch>/AVCHD
+            # and nothing else may share those names (the plan's meta file and
+            # prep outputs live there too).
+            episode_dir = temp_dir / f"episode-{index:03d}"
+            selection = (
+                request.selections[index - 1] if request.selections is not None else None
+            )
+            job = JobRequest(
+                source=source,
+                output_dir=episode_dir,
+                selection=selection,
+                options=request.options,
+                temp_dir=episode_dir,
+                ffprobe=request.ffprobe,
+            )
+            plan = build_job_plan(job, runner, temp_dir=episode_dir)
+            for row in describe_plan(plan):
+                self.line.emit(f"[avchd-forge] {row}\n")
+            plans.append(plan)
+
+        return execute_season(
+            plans,
+            runner,
+            destination=avchd_destination(request.output_dir),
+            ffprobe=request.ffprobe,
+            on_line=self.line.emit,
+            on_progress=self.progress.emit,
+            on_stage=self.stage_changed.emit,
+            keep_temp_on_success=request.keep_temp_on_success,
+            keep_temp_on_failure=request.keep_temp_on_failure,
+            owns_temp=True,  # this job created the directory with mkdtemp
+        )
+
     def _route_failure(
         self,
         exc: Exception,
@@ -520,6 +671,7 @@ class JobRunner(QtCore.QObject):
 
 __all__ = [
     "PLAN_STAGE_LABEL",
+    "SEASON_STAGE_LABEL",
     "TEMP_PREFIX",
     "JobCancellation",
     "JobFailure",
@@ -527,7 +679,9 @@ __all__ = [
     "JobRunner",
     "ProbeOutcome",
     "RunnerFactory",
+    "SeasonRequest",
     "build_job_plan",
     "describe_media",
     "describe_outcome",
+    "describe_season_outcome",
 ]
