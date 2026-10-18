@@ -10,8 +10,8 @@ missing.
 
 One limit is worth remembering: libbluray opens only the optical names
 (``BDMV/index.bdmv``). The AVCHD-on-FAT32 flavour a PS3 mounts from USB
-(``BDMV/INDEX.BDM``) is invisible to it — that half is what the console test in
-``docs/CONTEXT.md`` is for.
+(``BDMV/INDEX.BDM``) is invisible to it — that half went to the console and
+passed (``docs/CONTEXT.md`` §2.13).
 """
 
 from __future__ import annotations

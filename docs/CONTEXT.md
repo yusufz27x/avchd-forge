@@ -284,8 +284,10 @@ tree mounts without any manual folder step.
 
 The symptom was observed on the reporter's PS3 (FAT32 WD Elements with `AVCHD/`
 at the drive root): no XMB entry, parts played from the file browser. The rename
-is what avchd-forge now does after every mux (D22); live confirmation with a PS3
-is still pending.
+is what avchd-forge now does after every mux (D22); the season spike (2026-10-18,
+§2.13) was the live confirmation of the fix — its renamed tree mounted from the
+FAT32 drive and appeared in the XMB, where the reporter's optical-name tree had
+not.
 
 ### 2.12 Cropped 1080p sources: window crop (repairable) vs hard crop (refused)
 
@@ -378,8 +380,16 @@ implemented in `avchdforge.bdmv` and `avchdforge.season`:
   `bd_play` (disc insert) and `bd_play_title 2` ("Go To → Title 2"), reads
   episode 1's clip after insertion and episode 2's after the title search
   (`tests/test_e2e.py`, binding in `tests/libbluray.py`). libbluray opens only
-  the optical names, so the FAT32 flavour (`INDEX.BDM`) is invisible to it —
-  that half stays a console question (§4).
+  the optical names, so the FAT32 flavour (`INDEX.BDM`) needed the console side
+  of the check below.
+* Console check **(verified on the reporter's PS3, 2026-10-18)**: the tree
+  `scripts/build_season_spike.py` builds — two labelled 40-second episodes,
+  renamed to the FAT32 names, `AVCHD/` at the root of the FAT32 USB drive —
+  answered all four questions: the XMB lists the AVCHD disc, insertion plays
+  episode 1, "Go To → Title 2" reaches episode 2, and the Top Menu button
+  restarts title 1. With the libbluray check above, both halves of the tree are
+  confirmed: the layout by an independent parser, the FAT32 flavour by the
+  console.
 * Community knowledge, not verified here: one AVCHD folder per USB drive is what
   the XMB auto-mounts (multiAVCHD's author on doom9), which is why a season is
   one folder with N titles instead of N folders with one title each.
@@ -418,16 +428,10 @@ console test uses exactly the tree the feature will ship.
 | D23 | 2026-10-16 | The mux destination is `<chosen folder>/AVCHD` unless the chosen folder is itself named `AVCHD` (case-insensitive); `plan.avchd_destination` normalises it inside `build_plan`, `run_mux` creates the folder, and the cancellation leftover scan looks there | the PS3 mounts AVCHD from a USB drive root only from a folder called `AVCHD` (§2.11), and making the user create or select that folder is a needless failure point. Pointing at the drive root now just works, and pointing at an existing `AVCHD` folder does not nest a second one |
 | D24 | 2026-10-17 | The run bar weighs the phases by the data they move: a prep step is `PREP_STEP_WEIGHT = 1` (one read of the source), the mux `MUX_WEIGHT = 2` (that read plus the write), and the post-mux tail (flush, index, playlist, rename, verify, cleanup) a fixed `TAIL_SHARE = 2%` | with verification holding a whole unit of the bar, the mux ended at `(n+1)/(n+2)` — 80% with the reporter's three prep steps — and the tail then jumped the bar to 100%; the tail is seconds against the mux's minutes, so the transfer must end near the top |
 | D25 | 2026-10-17 | Non-standard video sizes are repaired or refused, never tolerated: V4 warns when `VideoTrack.restore_window()` finds a lossless SPS-window rewrite (the plan then carries a `video-window` prep step, `-c:v copy -bsf:v h264_metadata=…,dump_extra`, muxed from the raw ES as `track=0`) and stays a hard error otherwise; `restore_window()` also feeds the subtitle render size, the V6 frame-rate ceiling and the V13 PGS check with the *output* size, and `check_prep_output`/`_video_problem` verify the repaired size. The `mux/allow_nonstandard_resolution` opt-in is removed everywhere (`AppSettings`, `PlanOptions`, the Preferences checkbox, the re-check on policy change, `jobs`/`plan` re-validation) | D20's premise ("the PS3 usually plays cropped 1080p") is falsified — the reporter's PS3 refused 1920x1036 — so the opt-in only produced titles that were outside AVCHD *and* unplayable, while a warning the user could not act on is worse than none. Window-cropped releases are common and the repair is bit-exact (§2.12), so the two shapes deserve opposite verdicts rather than one override: repairable → warn and do it; unreachable → refuse, because only a re-encode could pad it and avchd-forge never re-encodes |
-| D26 | 2026-10-18 | Season support starts as **one AVCHD folder, one title per episode**: `bdmv.py` writes the multi-title `index.bdmv`/`MovieObject.bdmv` (episode objects `0..N-1`, tsMuxeR's TopMenu object `N`, its FirstPlay object `N+1`), `season.py` merges the per-episode mux trees by renumbering clips, and navigation uses the player's own "Go To → Title X" plus the Top Menu button. Chapters stay inside each episode's playlist; an authored HDMV/IG top menu is deferred, and one joined title + chapters is kept as the fallback. The single-title case must stay byte-identical to tsMuxeR's own files (`N = 1` golden fixtures), and the feature is **PS3-verification pending**, like D22. Work order: foundation + console spike first, GUI integration only after the spike answers (§2.13, `docs/IMPLEMENTATION_PLAN.md` §6) | "Go To → Title X" is documented for AVCHD players (Sony's TS3 manual) and needs no graphics, so the no-transcode rule keeps zero exceptions; an authored menu needs an HDMV/IG compiler that no open-source tool provides (tsMuxeR cannot ingest IG), and a joined title cannot be addressed per episode at all — the PS3 shows its chapters as one flat list. Checking the console's acceptance of a two-title tree before building any UI avoids designing a season mode around a layout the PS3 refuses |
+| D26 | 2026-10-18 | Season support starts as **one AVCHD folder, one title per episode**: `bdmv.py` writes the multi-title `index.bdmv`/`MovieObject.bdmv` (episode objects `0..N-1`, tsMuxeR's TopMenu object `N`, its FirstPlay object `N+1`), `season.py` merges the per-episode mux trees by renumbering clips, and navigation uses the player's own "Go To → Title X" plus the Top Menu button. Chapters stay inside each episode's playlist; an authored HDMV/IG top menu is deferred, and one joined title + chapters is kept as the fallback. The single-title case must stay byte-identical to tsMuxeR's own files (`N = 1` golden fixtures), and the feature is **PS3-verified** (2026-10-18, §2.13: the console listed the tree, played episode 1 on insert, reached episode 2 via "Go To → Title 2", and restarted title 1 from the Top Menu button). Work order: foundation + console spike first (both done; the spike also confirmed the D22 rename), GUI integration next (§2.13, `docs/IMPLEMENTATION_PLAN.md` §6) | "Go To → Title X" is documented for AVCHD players (Sony's TS3 manual) and needs no graphics, so the no-transcode rule keeps zero exceptions; an authored menu needs an HDMV/IG compiler that no open-source tool provides (tsMuxeR cannot ingest IG), and a joined title cannot be addressed per episode at all — the PS3 shows its chapters as one flat list. Checking the console's acceptance of a two-title tree before building any UI avoids designing a season mode around a layout the PS3 refuses |
 
 ## 4. Open items
 
-* Season navigation (D26/§2.13) is written, merged and verified against
-  libbluray's HDMV VM, but **no PS3 has played a season tree yet**. The spike
-  tree (`scripts/build_season_spike.py`) needs the console's answers to four
-  questions: does the XMB list it, does insertion play episode 1, does
-  "Go To → Title X" reach every episode, and what does the Top Menu button do.
-  Record the answers here before the GUI grows a season mode.
 * `tests/data/tsmuxer/detect_mkv.txt` must be refreshed if a future tsMuxeR changes
   the detection layout — the parser is deliberately lenient about spacing.
 * AVCHD legality of AAC and of level 4.2 is treated as a warning, not an error
@@ -440,9 +444,6 @@ console test uses exactly the tree the feature will ship.
   crop). Follow-up worth doing: sample the luma of the rows a repair would
   expose (one decoded frame is enough) and warn when they are not (near-)black,
   i.e. when the release cropped picture rather than bars.
-* The FAT32 rename (§2.11/D22) has not been on a PS3 yet: the reporter's console
-  did not mount the long-name tree (parts played individually), and the renamed
-  output is the scene-established fix. Confirm live and record the result here.
 * Core extraction cannot be exercised end-to-end with generated media: ffmpeg's
   own `eac3` encoder writes no AC-3 core (so `eac3_core` has nothing to emit,
   checked on 7.1.5) and there is no DTS-HD or TrueHD *encoder* at all. Those two
