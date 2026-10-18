@@ -150,3 +150,72 @@ def test_merge_refuses_a_playlist_that_names_a_foreign_clip(tmp_path):
     (source / "BDMV/PLAYLIST/00000.mpls").write_bytes(b"MPLS0100" + b"\x00" * 16 + b"00007M2TS")
     with pytest.raises(SeasonMergeError, match="00007"):
         merge_avchd_trees([source], tmp_path / "season")
+
+
+def tree_contents(root: Path) -> dict[str, bytes]:
+    """Every file under ``root``, keyed by its relative path."""
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_merge_move_produces_the_same_tree_as_a_copy(tmp_path):
+    copies = [
+        make_episode_tree(tmp_path / "copy" / f"episode{number}", parts=parts)
+        for number, parts in enumerate([2, 1, 3], start=1)
+    ]
+    moves = [
+        make_episode_tree(tmp_path / "move" / f"episode{number}", parts=parts)
+        for number, parts in enumerate([2, 1, 3], start=1)
+    ]
+    merged_copy = merge_avchd_trees(copies, tmp_path / "copied")
+    merged_move = merge_avchd_trees(moves, tmp_path / "moved", move=True)
+
+    assert tree_contents(merged_copy.root) == tree_contents(merged_move.root)
+    assert merged_copy.playlists == merged_move.playlists
+
+
+def test_merge_move_consumes_the_sources_clip_files(tmp_path):
+    first = make_episode_tree(tmp_path / "episode1", parts=2)
+    second = make_episode_tree(tmp_path / "episode2", parts=1)
+
+    season = merge_avchd_trees([first, second], tmp_path / "season", move=True)
+
+    for source, parts in ((first, 2), (second, 1)):
+        for stem in range(parts):
+            assert not (source / "BDMV/STREAM" / f"{stem:05d}.m2ts").exists()
+            assert not (source / "BDMV/CLIPINF" / f"{stem:05d}.clpi").exists()
+        assert not (source / "BDMV/PLAYLIST/00000.mpls").exists()
+    merged_streams = sorted(path.name for path in (season.root / "BDMV/STREAM").iterdir())
+    assert merged_streams == ["00000.m2ts", "00001.m2ts", "00002.m2ts"]
+
+
+def test_merge_validates_every_source_before_it_writes_anything(tmp_path):
+    good = make_episode_tree(tmp_path / "episode1", parts=1)
+    bad = make_episode_tree(tmp_path / "episode2", parts=1)
+    (bad / "BDMV/STREAM/00000.m2ts").unlink()
+    destination = tmp_path / "season"
+    destination.mkdir()
+
+    with pytest.raises(SeasonMergeError, match="CLIPINF and STREAM do not match"):
+        merge_avchd_trees([good, bad], destination, move=True)
+
+    # Nothing was written, and the good episode's tree is still intact for a retry.
+    assert list(destination.iterdir()) == []
+    assert (good / "BDMV/STREAM/00000.m2ts").is_file()
+
+
+def test_merge_reports_stream_byte_progress(tmp_path):
+    sources = [
+        make_episode_tree(tmp_path / f"episode{number}", parts=parts)
+        for number, parts in enumerate([2, 2], start=1)
+    ]
+    progress: list[float] = []
+
+    merge_avchd_trees(sources, tmp_path / "season", on_progress=progress.append)
+
+    # Four 69-byte stream parts in two episodes: the first episode's tree lands
+    # verbatim (one step), the second episode reports part by part.
+    assert progress == [pytest.approx(value) for value in (0.5, 0.75, 1.0)]
