@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -25,7 +26,13 @@ from avchdforge.drives import Drive
 from avchdforge.selection import TrackSelection
 from avchdforge.settings import AppSettings, settings_for
 from avchdforge.tooling import FFMPEG, FFPROBE, TSMUXER, ToolInfo, ToolReport
-from avchdforge.ui.main_window import MainWindow, drop_accepts, dropped_file
+from avchdforge.ui.main_window import (
+    MainWindow,
+    drop_accepts,
+    dropped_file,
+    dropped_files,
+    natural_key,
+)
 from avchdforge.ui.preferences import PreferencesDialog
 
 from .conftest import FakeResponse, FakeRunner, astream, load_json, vstream
@@ -389,7 +396,7 @@ def test_an_unusable_file_disables_start_and_explains_why(tmp_path: Path) -> Non
 
     assert window.probe_outcome is not None and not window.probe_outcome.ok
     assert not window.start_button.isEnabled()
-    assert window.status_label.text().startswith("This file cannot be used")
+    assert window.status_label.text().startswith("source.mkv cannot be used")
     assert "cannot be used" in window.start_button.toolTip()
 
 
@@ -417,7 +424,7 @@ def test_unchecking_every_audio_track_blocks_start_again(tmp_path: Path) -> None
     assert window.track_view.selection() == TrackSelection()
     assert window.track_view.report.ok is False
     assert not window.start_button.isEnabled()
-    assert window.status_label.text().startswith("This file cannot be used")
+    assert window.status_label.text().startswith("source.mkv cannot be used")
 
 
 # --------------------------------------------------------------------------
@@ -704,19 +711,29 @@ def mime_with(*paths: Path) -> QtCore.QMimeData:
     return mime
 
 
-def test_drop_helpers_accept_exactly_one_local_media_file(tmp_path: Path) -> None:
+def test_drop_helpers_take_one_or_more_local_media_files(tmp_path: Path) -> None:
     source = write_source(tmp_path)
     other = write_source(tmp_path, "other.mkv")
     text = write_source(tmp_path, "notes.txt")
 
+    assert dropped_files(mime_with(source)) == (source,)
+    assert dropped_files(mime_with(source, other)) == (source, other)
+    assert dropped_files(QtCore.QMimeData()) == ()
     assert dropped_file(mime_with(source)) == source
-    assert dropped_file(mime_with(source, other)) is None
-    assert dropped_file(QtCore.QMimeData()) is None
+    assert dropped_file(mime_with(source, other)) is None  # a season needs the list
 
     assert drop_accepts(mime_with(source))
+    assert drop_accepts(mime_with(source, other))
     assert not drop_accepts(mime_with(text))
-    assert not drop_accepts(mime_with(source, other))
+    assert not drop_accepts(mime_with(source, text))  # every file must be usable
     assert not drop_accepts(mime_with(tmp_path))  # a directory is not a source
+
+
+def test_natural_key_reads_numbers_as_numbers(tmp_path: Path) -> None:
+    names = ["S01E10.mkv", "S01E2.mkv", "S01E02.mkv"]
+    order = sorted(names, key=lambda name: natural_key(Path(name)))
+
+    assert order == ["S01E2.mkv", "S01E02.mkv", "S01E10.mkv"]
 
 
 def test_dropping_a_file_probes_it(tmp_path: Path) -> None:
@@ -725,23 +742,213 @@ def test_dropping_a_file_probes_it(tmp_path: Path) -> None:
     window = make_window(tmp_path, runner)
     source = write_source(tmp_path)
 
-    assert window.handle_drop(mime_with(source)) == source
+    assert window.handle_drop(mime_with(source)) == (source,)
 
+    assert [episode.path for episode in window.episodes] == [source]
     assert window.source == source
     assert window.probe_outcome is not None
 
 
-def test_dropping_several_files_changes_nothing(tmp_path: Path) -> None:
+def test_dropping_several_files_adds_one_episode_each(tmp_path: Path) -> None:
     runner = FakeRunner()
+    script_probe(runner)
+    script_probe(runner)
     window = make_window(tmp_path, runner)
     source = write_source(tmp_path)
     other = write_source(tmp_path, "other.mkv")
 
-    assert window.handle_drop(mime_with(source, other)) is None
+    dropped = window.handle_drop(mime_with(source, other))
 
-    assert window.source is None
-    assert runner.calls == []
-    assert "Ignored the drop" in window.statusBar().currentMessage()
+    # A drop carries no meaningful order, so the list sorts by name — and a
+    # second file is a season, not a replacement.
+    assert dropped == (source, other)
+    assert [episode.path for episode in window.episodes] == [other, source]
+    assert window.source is None  # two episodes are not "the source"
+    assert [call for call in runner.calls if "-show_streams" in call]  # probed both
+    assert "2 episodes" in window.status_label.text()
+
+
+# --------------------------------------------------------------------------
+# seasons
+# --------------------------------------------------------------------------
+
+
+def script_season(runner: FakeRunner, names: Sequence[str]) -> None:
+    """Everything a season run asks of tools, per file: two probes, detect, mux.
+
+    The window probes a file when it is added and the job probes it again when
+    Start builds the episode's plan, so both are scripted — matching on the file
+    name keeps the two episodes' answers apart whatever order they are consumed
+    in. The staged trees keep tsMuxeR's lowercase ``.m2ts`` names until the merge
+    renames them, which is why the verification probe matches lowercase here.
+    """
+    for name in names:
+        runner.add_stdout(PROBE_JSON_TEXT, match=name)  # the window's probe
+        runner.add_stdout(PROBE_JSON_TEXT, match=name)  # the plan's own probe
+        runner.add_stdout(DETECTION, match=name)
+        runner.add(
+            FakeResponse(
+                stdout=MUX_OK,
+                match="tsmuxer-meta.txt",
+                side_effect=lambda argv: fake_tree(Path(argv[-1])),
+            )
+        )
+        runner.add_stdout(json.dumps(output_payload(vstream(0), astream(1))), match=".m2ts")
+
+
+def season_window(
+    tmp_path: Path, *, names: Sequence[str] = ("EP01.mkv", "EP02.mkv")
+) -> tuple[MainWindow, FakeRunner, tuple[Path, ...]]:
+    """A window with a probed season listed and an output folder chosen."""
+    runner = FakeRunner()
+    script_season(runner, names)
+    window = make_window(tmp_path, runner)
+    episodes = tuple(write_source(tmp_path, name) for name in names)
+    window.add_sources(episodes)
+    window.set_output_dir(tmp_path / "out")
+    return window, runner, episodes
+
+
+def test_a_season_is_probed_one_episode_at_a_time(tmp_path: Path) -> None:
+    window, runner, episodes = season_window(tmp_path, names=("EP02.mkv", "EP01.mkv"))
+
+    # Added out of order: the list is the play order, so it sorts by name.
+    assert [episode.path for episode in window.episodes] == [episodes[1], episodes[0]]
+    assert all(episode.outcome is not None for episode in window.episodes)
+    assert len(runner.calls) == 2  # one probe each, no mux yet
+    assert window.probe_outcome is window.episodes[1].outcome  # the highlighted row
+    assert window.start_button.isEnabled()
+    assert "2 episodes" in window.status_label.text()
+
+
+def test_each_episode_keeps_its_own_selection(tmp_path: Path) -> None:
+    window, _runner, _episodes = season_window(tmp_path)
+
+    window.episode_list.setCurrentRow(0)
+    window.track_view.set_checked("audio", 2, True)  # keep both audio tracks, title 1
+    window.track_view.set_checked("audio", 1, False)
+    first = window.track_view.selection()
+
+    window.episode_list.setCurrentRow(1)
+
+    assert window.track_view.selection() == TrackSelection(audio=(1,))  # untouched
+
+    window.episode_list.setCurrentRow(0)
+
+    assert window.track_view.selection() == first == TrackSelection(audio=(2,))
+
+    request = window.season_request()
+    assert request is not None
+    assert request.selections == (TrackSelection(audio=(2,)), TrackSelection(audio=(1,)))
+    assert window.job_request() is None  # one file at a time is the single flow
+
+
+def test_start_runs_a_season_into_one_title_per_episode(tmp_path: Path) -> None:
+    window, runner, _episodes = season_window(tmp_path)
+
+    assert window.start()
+
+    assert [episode.path.name for episode in window.episodes] == ["EP01.mkv", "EP02.mkv"]
+    # per episode: plan probe, detection, mux, verification probe
+    assert len(runner.calls) == 2 + 4 * 2
+    assert "starting season: 2 episodes" in window.log_pane.text()
+    assert "2 titles" in window.status_label.text()
+    assert not window.busy
+    # each title got its own clip and playlist, renumbered by the merge
+    bdmv = tmp_path / "out" / "AVCHD" / "BDMV"
+    assert sorted(path.name for path in (bdmv / "STREAM").iterdir()) == [
+        "00000.MTS",
+        "00001.MTS",
+    ]
+    assert sorted(path.name for path in (bdmv / "PLAYLIST").iterdir()) == [
+        "00000.MPL",
+        "00001.MPL",
+    ]
+    assert "00001M2TS" in (bdmv / "PLAYLIST" / "00001.MPL").read_bytes().decode("ascii")
+
+
+def test_removing_and_reordering_episodes_rewrites_the_title_order(tmp_path: Path) -> None:
+    window, _runner, episodes = season_window(tmp_path)
+
+    window.episode_list.setCurrentRow(0)
+    assert window.move_down_button.isEnabled() and not window.move_up_button.isEnabled()
+
+    assert window.move_episode(1)
+
+    assert [episode.path for episode in window.episodes] == [episodes[1], episodes[0]]
+    request = window.season_request()
+    assert request is not None and request.sources == (episodes[1], episodes[0])
+
+    assert window.remove_episode()
+
+    assert [episode.path for episode in window.episodes] == [episodes[1]]
+    assert window.source == episodes[1]  # one file again: the single flow
+    assert "removed EP01.mkv" in window.log_pane.text()
+
+    assert window.remove_episode()
+    assert window.episodes == ()
+    assert window.source is None and not window.start_button.isEnabled()
+    assert "open one or more" in window.status_label.text()
+
+
+def test_an_episode_that_cannot_be_read_is_marked_and_blocks_start(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    script_season(runner, ("EP00.mkv",))
+    runner.responses.insert(
+        0,
+        FakeResponse(
+            stderr="moov atom not found", returncode=1, match="EP01.mkv"
+        ),
+    )
+    window = make_window(tmp_path, runner)
+    good = write_source(tmp_path, "EP00.mkv")
+    bad = write_source(tmp_path, "EP01.mkv")
+    window.add_sources((good, bad))
+    window.set_output_dir(tmp_path / "out")
+
+    assert len(runner.calls) == 2  # one bad file does not stop the queue
+    assert window.episodes[0].failure is None
+    assert window.episodes[1].failure == "Could not read the input file"
+    assert not window.start_button.isEnabled()
+    assert "EP01.mkv cannot be read" in window.status_label.text()
+    assert "EP01.mkv cannot be read" in window.start_button.toolTip()
+    assert "EP01.mkv" in window.episode_list.item(1).text()
+
+
+def test_adding_the_same_file_twice_lists_it_once(tmp_path: Path) -> None:
+    window, runner, episodes = season_window(tmp_path, names=("EP01.mkv",))
+
+    assert window.add_sources((episodes[0], episodes[0])) is False
+
+    assert [episode.path for episode in window.episodes] == [episodes[0]]
+    assert len(runner.calls) == 1  # only the first add probed
+
+
+def test_new_language_priorities_re_derive_every_episode(tmp_path: Path) -> None:
+    window, _runner, _episodes = season_window(tmp_path)
+    window.episode_list.setCurrentRow(0)
+    window.track_view.set_checked("audio", 2, True)
+    window.track_view.set_checked("audio", 1, False)
+    assert window.episodes[0].selection == TrackSelection(audio=(2,))
+
+    window._reselect_defaults()  # what Preferences ▸ Apply calls after a change
+
+    assert all(
+        episode.selection == TrackSelection(audio=(1,)) for episode in window.episodes
+    )
+    assert "defaults re-derived" in window.log_pane.text()
+
+
+def test_open_source_after_a_season_replaces_the_list(tmp_path: Path) -> None:
+    window, runner, _episodes = season_window(tmp_path)
+    runner.add_stdout(PROBE_JSON_TEXT, match="EP03.mkv")
+    replacement = write_source(tmp_path, "EP03.mkv")
+
+    assert window.open_source(replacement)
+
+    assert [episode.path for episode in window.episodes] == [replacement]
+    assert window.source == replacement
+    assert "EP01.mkv" not in [episode.path.name for episode in window.episodes]
 
 
 # --------------------------------------------------------------------------
