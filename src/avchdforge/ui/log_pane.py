@@ -152,7 +152,11 @@ class LogPane(QtWidgets.QWidget):
 
     def _stage_label(self, text: str) -> QtWidgets.QLabel:
         self._stage_label_widget = QtWidgets.QLabel(text, self)
-        self._stage_label_widget.setStyleSheet("color: palette(mid);")
+        # ``palette(mid)`` is a bevel colour that collapses into the window colour
+        # on dark palettes; PlaceholderText is the palette's muted text role.
+        self._stage_label_widget.setForegroundRole(
+            QtGui.QPalette.ColorRole.PlaceholderText
+        )
         return self._stage_label_widget
 
     @staticmethod

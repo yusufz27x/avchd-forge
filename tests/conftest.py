@@ -161,6 +161,62 @@ def make_runner() -> Callable[..., FakeRunner]:
 
 
 # --------------------------------------------------------------------------
+# Qt rendering helpers (imported lazily: the core suite runs without Qt)
+# --------------------------------------------------------------------------
+
+
+def dark_palette() -> Any:
+    """A dark scheme shaped like Breeze Dark — including the trap.
+
+    Real dark themes set ``Mid`` (a bevel colour) to the window colour, which is
+    why a label coloured with ``palette(mid)`` disappears on them. The
+    placeholder is half-transparent window text, as dark themes do it.
+    """
+    from PySide6 import QtGui
+
+    palette = QtGui.QPalette()
+    palette.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor("#232629"))
+    palette.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor("#eff0f1"))
+    palette.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor("#2a2e32"))
+    palette.setColor(QtGui.QPalette.ColorRole.Text, QtGui.QColor("#eff0f1"))
+    palette.setColor(QtGui.QPalette.ColorRole.Mid, QtGui.QColor("#232627"))
+    placeholder = QtGui.QColor("#eff0f1")
+    placeholder.setAlpha(128)
+    palette.setColor(QtGui.QPalette.ColorRole.PlaceholderText, placeholder)
+    return palette
+
+
+def text_contrast(label: Any) -> float:
+    """WCAG contrast between a grabbed label's text pixels and its background.
+
+    The grab is the ground truth: a colour that collapsed into the background
+    leaves the image almost uniform and the ratio near 1, whatever role or
+    stylesheet asked for it.
+    """
+    from PySide6 import QtGui
+
+    def luminance(color: QtGui.QColor) -> float:
+        def channel(value: float) -> float:
+            return value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+
+        return (
+            0.2126 * channel(color.redF())
+            + 0.7152 * channel(color.greenF())
+            + 0.0722 * channel(color.blueF())
+        )
+
+    label.adjustSize()
+    image = label.grab().toImage()
+    luminances = [
+        luminance(image.pixelColor(x, y))
+        for y in range(image.height())
+        for x in range(image.width())
+    ]
+    low, high = min(luminances), max(luminances)
+    return (high + 0.05) / (low + 0.05)
+
+
+# --------------------------------------------------------------------------
 # Fixture data helpers
 # --------------------------------------------------------------------------
 

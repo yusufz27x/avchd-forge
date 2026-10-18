@@ -20,6 +20,8 @@ from PySide6 import QtWidgets
 
 from avchdforge.ui.log_pane import MAX_BLOCKS, LogPane
 
+from .conftest import dark_palette, text_contrast
+
 pytestmark = pytest.mark.usefixtures("qapp")
 
 
@@ -126,6 +128,17 @@ def test_stage_label_shows_what_the_job_is_doing(pane: LogPane) -> None:
     pane.set_stage("muxing")
 
     assert pane._stage_label_widget.text() == "muxing"
+
+
+def test_the_stage_label_stays_readable_on_a_dark_palette(pane: LogPane, qapp) -> None:
+    pane.set_stage("muxing")
+    original = qapp.palette()
+    qapp.setPalette(dark_palette())
+    try:
+        # ``palette(mid)`` on Breeze-Dark-shaped colours: text == background.
+        assert text_contrast(pane._stage_label_widget) > 3
+    finally:
+        qapp.setPalette(original)
 
 
 def test_the_pane_is_capped_so_a_runaway_tool_cannot_grow_it_forever(pane: LogPane) -> None:

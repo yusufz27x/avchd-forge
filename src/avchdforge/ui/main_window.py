@@ -328,7 +328,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.stage_label = QtWidgets.QLabel("Ready", bar)
         self.stage_label.setMinimumWidth(150)
-        self.stage_label.setStyleSheet("color: palette(mid);")
+        # Never ``color: palette(mid)``: Mid is a bevel colour, and dark palettes
+        # set it to (nearly) the window colour, so the stage text disappears.
+        # PlaceholderText is the palette's own "muted but readable" text role.
+        self.stage_label.setForegroundRole(QtGui.QPalette.ColorRole.PlaceholderText)
 
         self.status_label = QtWidgets.QLabel(bar)
         self.status_label.setSizePolicy(
@@ -1038,13 +1041,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._assess_output()  # the run may have left a tree behind (V20)
         self._set_busy(False)
         if titles > 1:
-            self.status_label.setText(
+            self._set_status(
                 f"Done — {titles} titles ({count} stream parts) written to "
                 f"{outcome.output_dir}"
             )
             self.notify(f"Season finished: {titles} titles")
         else:
-            self.status_label.setText(
+            self._set_status(
                 f"Done — {count} stream part{'s' if count != 1 else ''} written to "
                 f"{outcome.output_dir}"
             )
@@ -1069,8 +1072,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._temp_dir = failure.temp_dir
         self._assess_output()  # a failed mux can leave a partial tree behind (V20)
         self._set_busy(False)
-        self.status_label.setText(failure.title)
-        self.status_label.setToolTip(failure.detail)
+        self._set_status(failure.title, failure.detail)
         self.notify(failure.detail)
 
     def _on_cancelled(self, cancellation: JobCancellation) -> None:
@@ -1092,12 +1094,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self._temp_dir = cancellation.temp_dir
         self._assess_output()  # a cancelled mux can leave a partial tree behind (V20)
         self._set_busy(False)
-        self.status_label.setText(f"Cancelled {cancellation.stage}".strip())
+        self._set_status(f"Cancelled {cancellation.stage}".strip())
         self.notify("Job cancelled")
 
     # ------------------------------------------------------------------
     # state
     # ------------------------------------------------------------------
+
+    def _set_status(self, text: str, tooltip: str = "") -> None:
+        """One writer for the run bar's status line: text and tooltip move together.
+
+        A failure keeps its detail in the tooltip, so every later text — a settled
+        summary or a line a new run wipes — must clear the tooltip with it.
+        """
+        self.status_label.setText(text)
+        self.status_label.setToolTip(tooltip)
 
     @property
     def busy(self) -> bool:
@@ -1115,6 +1126,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._progress = None
             self.progress_bar.setRange(0, 0)
             self.elapsed_label.setText("0:00")
+            self._set_status("")  # the last run's line never belongs to this one
             self._elapsed_timer.start()
         else:
             self._elapsed_timer.stop()
@@ -1208,20 +1220,20 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._busy:
             return
         if self._toolchain is None and self._tool_report is not None:
-            self.status_label.setText("External tools missing")
+            self._set_status("External tools missing")
             return
         if not self._episodes:
-            self.status_label.setText("Ready — open one or more .mkv/.ts files")
+            self._set_status("Ready — open one or more .mkv/.ts files")
             return
         pending = next((episode for episode in self._episodes if episode.pending), None)
         if pending is not None:
-            self.status_label.setText(f"{pending.path.name} has not been read yet")
+            self._set_status(f"{pending.path.name} has not been read yet")
             return
         broken = next(
             (episode for episode in self._episodes if episode.failure is not None), None
         )
         if broken is not None:
-            self.status_label.setText(f"{broken.path.name} cannot be read — {broken.failure}")
+            self._set_status(f"{broken.path.name} cannot be read — {broken.failure}")
             return
         unreadable = next(
             (
@@ -1234,7 +1246,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if unreadable is not None:
             assert unreadable.report is not None
             first = unreadable.report.errors[0]
-            self.status_label.setText(f"{unreadable.path.name} cannot be used — {first.message}")
+            self._set_status(f"{unreadable.path.name} cannot be used — {first.message}")
             return
         if len(self._episodes) > 1:
             selected = sum(
@@ -1242,12 +1254,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 for episode in self._episodes
                 if episode.selection is not None
             )
-            self.status_label.setText(
+            self._set_status(
                 f"{len(self._episodes)} episodes (season) — {selected} track(s) selected"
             )
             return
         media = self._episodes[0].outcome.media
-        self.status_label.setText(
+        self._set_status(
             f"{media.path.name} — {len(media.audio)} audio, "
             f"{len(media.subtitles)} subtitle track(s), {media.duration_label}"
         )

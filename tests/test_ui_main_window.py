@@ -35,7 +35,15 @@ from avchdforge.ui.main_window import (
 )
 from avchdforge.ui.preferences import PreferencesDialog
 
-from .conftest import FakeResponse, FakeRunner, astream, load_json, vstream
+from .conftest import (
+    FakeResponse,
+    FakeRunner,
+    astream,
+    dark_palette,
+    load_json,
+    text_contrast,
+    vstream,
+)
 from .test_jobs import DETECTION, MUX_OK, PROBE_JSON_TEXT, fake_tree, output_payload
 
 pytestmark = pytest.mark.usefixtures("qapp")
@@ -661,6 +669,64 @@ def test_a_failed_job_reports_the_title_and_keeps_evidence(tmp_path: Path) -> No
     assert "exit code 1" in window.status_label.toolTip()
     assert window.temp_dir is not None and window.temp_dir.exists()
     assert window.open_temp_button.isEnabled()
+
+
+def test_a_new_run_wipes_the_previous_result_line(tmp_path: Path) -> None:
+    window, runner, _source = prepared_window(tmp_path)
+    script_success(runner)
+    runner.responses.pop(0)  # the probe already happened through the UI
+    runner.responses[-2] = FakeResponse(
+        stderr="Something went wrong", returncode=1, match="tsmuxer-meta.txt"
+    )
+    assert window.start()
+    assert window.status_label.text() == "tsMuxeR failed"
+    assert "exit code 1" in window.status_label.toolTip()
+
+    # The next run owns the line: neither the failure text nor its tooltip may
+    # survive into it (the stage label says what is happening meanwhile).
+    script_success(runner)
+    seen: list[tuple[str, str]] = []
+
+    def capture_then_mux(argv: Sequence[str]) -> None:
+        seen.append((window.status_label.text(), window.status_label.toolTip()))
+        fake_tree(Path(argv[-1]))
+
+    runner.responses[-2] = FakeResponse(
+        stdout=MUX_OK, match="tsmuxer-meta.txt", side_effect=capture_then_mux
+    )
+
+    assert window.start()
+
+    assert seen == [("", "")]  # mid-run: wiped at start, still wiped
+    assert window.status_label.text().startswith("Done — ")
+    assert window.status_label.toolTip() == ""
+
+
+def test_the_failure_tooltip_clears_with_the_failure_line(tmp_path: Path) -> None:
+    window, runner, _source = prepared_window(tmp_path)
+    script_success(runner)
+    runner.responses.pop(0)
+    runner.responses[-2] = FakeResponse(
+        stderr="Something went wrong", returncode=1, match="tsmuxer-meta.txt"
+    )
+    assert window.start()
+    assert window.status_label.toolTip()
+
+    window.set_output_dir(tmp_path / "other")  # any settled state resets the line
+
+    assert window.status_label.text().startswith("source.mkv —")
+    assert window.status_label.toolTip() == ""
+
+
+def test_the_stage_text_stays_readable_on_a_dark_palette(tmp_path: Path, qapp) -> None:
+    window, _runner, _source = prepared_window(tmp_path)
+    original = qapp.palette()
+    qapp.setPalette(dark_palette())
+    try:
+        # ``palette(mid)`` on Breeze-Dark-shaped colours: text == background.
+        assert text_contrast(window.stage_label) > 3
+    finally:
+        qapp.setPalette(original)
 
 
 def test_start_without_a_toolchain_does_nothing(tmp_path: Path) -> None:
