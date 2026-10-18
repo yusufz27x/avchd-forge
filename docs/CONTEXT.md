@@ -395,9 +395,34 @@ implemented in `avchdforge.bdmv` and `avchdforge.season`:
   one folder with N titles instead of N folders with one title each.
 
 `scripts/build_season_spike.py` runs the whole path on real episode files — the
-application's own mux per episode (probe → plan → prep → tsMuxeR), the merge,
-one rename to the FAT32 names — and prints the title table it wrote, so the
-console test uses exactly the tree the feature will ship.
+application's own season call (`backend.execute_season`), the merge, one rename
+to the FAT32 names — and prints the title table it wrote, so the console test
+uses exactly the tree the feature ships and cannot drift from the GUI path.
+
+### 2.14 Season UI: one list, one title per file
+
+* The window has one input path: the episode list. Exactly one listed file is
+  the single-title flow (`JobRequest` → `start_job`); two or more become a
+  season (`SeasonRequest` → `start_season` → `execute_season`). The list order
+  *is* the title order: a batch is sorted with `natural_key` (`ep02` before
+  `ep10`) because a drop carries no order of its own, and *Move up* / *Move
+  down* then decide.
+* Probing is a queue — one file at a time, one probe per file, the highlighted
+  row is what the track view edits — and each row shows the duration and how
+  many tracks the episode keeps. Every episode keeps its own `TrackSelection`
+  (title 1 can keep both audio tracks while title 2 converts its subtitles), and
+  new language priorities in Preferences re-derive the defaults of all of them.
+  A file whose probe cannot answer is marked in place and blocks Start; the rest
+  of the list is still read.
+* Offscreen check **(2026-10-18, not console)**: with the real merge and faked
+  tools, a 3-episode run reported "Done — 3 titles (3 stream parts) written to
+  `<out>/AVCHD`", the window titled "avchd-forge — 3 episodes (season)", and
+  Start was disabled afterwards by V20 because the folder now holds a tree. The
+  spike script was re-run with real tools on two 8-second demo episodes through
+  the same `execute_season` call the GUI makes: titles 1/2 → playlists
+  `00000`/`00001`, 14 files renamed to the FAT32 names, merged tree verified.
+  The *layout* is console-verified (§2.13); the GUI path itself is pending a
+  console run.
 
 ## 3. Decision log
 
@@ -428,7 +453,9 @@ console test uses exactly the tree the feature will ship.
 | D23 | 2026-10-16 | The mux destination is `<chosen folder>/AVCHD` unless the chosen folder is itself named `AVCHD` (case-insensitive); `plan.avchd_destination` normalises it inside `build_plan`, `run_mux` creates the folder, and the cancellation leftover scan looks there | the PS3 mounts AVCHD from a USB drive root only from a folder called `AVCHD` (§2.11), and making the user create or select that folder is a needless failure point. Pointing at the drive root now just works, and pointing at an existing `AVCHD` folder does not nest a second one |
 | D24 | 2026-10-17 | The run bar weighs the phases by the data they move: a prep step is `PREP_STEP_WEIGHT = 1` (one read of the source), the mux `MUX_WEIGHT = 2` (that read plus the write), and the post-mux tail (flush, index, playlist, rename, verify, cleanup) a fixed `TAIL_SHARE = 2%` | with verification holding a whole unit of the bar, the mux ended at `(n+1)/(n+2)` — 80% with the reporter's three prep steps — and the tail then jumped the bar to 100%; the tail is seconds against the mux's minutes, so the transfer must end near the top |
 | D25 | 2026-10-17 | Non-standard video sizes are repaired or refused, never tolerated: V4 warns when `VideoTrack.restore_window()` finds a lossless SPS-window rewrite (the plan then carries a `video-window` prep step, `-c:v copy -bsf:v h264_metadata=…,dump_extra`, muxed from the raw ES as `track=0`) and stays a hard error otherwise; `restore_window()` also feeds the subtitle render size, the V6 frame-rate ceiling and the V13 PGS check with the *output* size, and `check_prep_output`/`_video_problem` verify the repaired size. The `mux/allow_nonstandard_resolution` opt-in is removed everywhere (`AppSettings`, `PlanOptions`, the Preferences checkbox, the re-check on policy change, `jobs`/`plan` re-validation) | D20's premise ("the PS3 usually plays cropped 1080p") is falsified — the reporter's PS3 refused 1920x1036 — so the opt-in only produced titles that were outside AVCHD *and* unplayable, while a warning the user could not act on is worse than none. Window-cropped releases are common and the repair is bit-exact (§2.12), so the two shapes deserve opposite verdicts rather than one override: repairable → warn and do it; unreachable → refuse, because only a re-encode could pad it and avchd-forge never re-encodes |
-| D26 | 2026-10-18 | Season support starts as **one AVCHD folder, one title per episode**: `bdmv.py` writes the multi-title `index.bdmv`/`MovieObject.bdmv` (episode objects `0..N-1`, tsMuxeR's TopMenu object `N`, its FirstPlay object `N+1`), `season.py` merges the per-episode mux trees by renumbering clips, and navigation uses the player's own "Go To → Title X" plus the Top Menu button. Chapters stay inside each episode's playlist; an authored HDMV/IG top menu is deferred, and one joined title + chapters is kept as the fallback. The single-title case must stay byte-identical to tsMuxeR's own files (`N = 1` golden fixtures), and the feature is **PS3-verified** (2026-10-18, §2.13: the console listed the tree, played episode 1 on insert, reached episode 2 via "Go To → Title 2", and restarted title 1 from the Top Menu button). Work order: foundation + console spike first (both done; the spike also confirmed the D22 rename), GUI integration next (§2.13, `docs/IMPLEMENTATION_PLAN.md` §6) | "Go To → Title X" is documented for AVCHD players (Sony's TS3 manual) and needs no graphics, so the no-transcode rule keeps zero exceptions; an authored menu needs an HDMV/IG compiler that no open-source tool provides (tsMuxeR cannot ingest IG), and a joined title cannot be addressed per episode at all — the PS3 shows its chapters as one flat list. Checking the console's acceptance of a two-title tree before building any UI avoids designing a season mode around a layout the PS3 refuses |
+| D26 | 2026-10-18 | Season support starts as **one AVCHD folder, one title per episode**: `bdmv.py` writes the multi-title `index.bdmv`/`MovieObject.bdmv` (episode objects `0..N-1`, tsMuxeR's TopMenu object `N`, its FirstPlay object `N+1`), `season.py` merges the per-episode mux trees by renumbering clips, and navigation uses the player's own "Go To → Title X" plus the Top Menu button. Chapters stay inside each episode's playlist; an authored HDMV/IG top menu is deferred, and one joined title + chapters is kept as the fallback. The single-title case must stay byte-identical to tsMuxeR's own files (`N = 1` golden fixtures), and the feature is **PS3-verified** (2026-10-18, §2.13: the console listed the tree, played episode 1 on insert, reached episode 2 via "Go To → Title 2", and restarted title 1 from the Top Menu button). Work order: foundation + console spike first (both done; the spike also confirmed the D22 rename), GUI integration next — landed 2026-10-18 as D27 (§2.14, `docs/IMPLEMENTATION_PLAN.md` §6) | "Go To → Title X" is documented for AVCHD players (Sony's TS3 manual) and needs no graphics, so the no-transcode rule keeps zero exceptions; an authored menu needs an HDMV/IG compiler that no open-source tool provides (tsMuxeR cannot ingest IG), and a joined title cannot be addressed per episode at all — the PS3 shows its chapters as one flat list. Checking the console's acceptance of a two-title tree before building any UI avoids designing a season mode around a layout the PS3 refuses |
+| D27 | 2026-10-18 | The source row is an **episode list** (one file per title; list order = title order) and the only input path: exactly one listed file builds a `JobRequest` → `start_job` (the unchanged single-title flow), two or more build a `SeasonRequest` → `start_season` → `backend.execute_season`. Each episode keeps its own `TrackSelection`; probes run one file at a time and a probe that cannot answer marks its row and blocks Start; a batch is sorted with `natural_key` because a drop carries no order of its own; every season plan has `output_dir == temp_dir/AVCHD` under `<temp>/episode-NNN`, the season's chosen folder is checked for V20 once in `_season` before any tool runs, and the run bar weighs per episode `prep + mux` plus one merge unit | a season needs per-episode selections — episode 2's tracks are not episode 1's — and routing the one-file case through the unchanged job path is what keeps D26's byte-identical guarantee meaningful in the GUI. V20 stays refusal-only for v1: "add episodes to an existing season folder" would need in-place renumbering of a tree the app did not write, which is exactly what V20 promises never to do silently |
+| D28 | 2026-10-18 | `JobRunner` releases its runner **before** it emits `probed`, `finished`, `failed` or `cancelled`: the exception is captured, `_end()` runs, then the failure is routed and emitted | the window reads a list of files one probe at a time and starts the next probe from the failure handler, while `start_*` refuses to run while `busy`; emitting first forced every such caller to defer through the event loop (and its tests to spin it), so the ordering is a documented contract instead of an accident of `finally` |
 
 ## 4. Open items
 
@@ -450,3 +477,8 @@ console test uses exactly the tree the feature will ship.
   paths are pinned by argv/unit tests only; a real Blu-ray sample would be
   needed for a live run.
 * Windows/macOS drive detection is best-effort via `os.listdrives`/`lsblk` fallback.
+* Season support is PS3-verified for the *layout* (§2.13) but not yet for the GUI
+  path built on it (§2.14): the console run used the spike tree, and no real
+  release (two 40-minute episodes, subtitles, a split episode) has been through
+  a season. Per-episode chapters follow from each plan carrying its own meta
+  text, but that is reasoning, not a console result.

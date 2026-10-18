@@ -49,12 +49,16 @@ src/avchdforge/     application package (src layout)
   process.py        Runner protocol, SubprocessRunner, QProcessRunner
   progress.py       progress-line parsers (tsMuxeR, ffmpeg -progress)
   backend.py        executes a JobPlan, verifies the AVCHD/BDAV output layout
+  bdmv.py           index.bdmv/MovieObject.bdmv readers + writers (pure, golden-file tested)
+  season.py         merge per-episode AVCHD trees into one multi-title tree (pure)
   jobs.py           Qt orchestration: signals, cancel, temp-file policy
   drives.py         removable-drive + filesystem detection
   settings.py       QSettings wrapper
-  ui/               main_window.py, track_view.py, log_pane.py, preferences.py, ...
+  ui/               main_window.py (episode list = one title per file), track_view.py,
+                    log_pane.py, preferences.py, ...
 tests/              pytest; unit tests mock the Runner, never spawn tools
 docs/               IMPLEMENTATION_PLAN.md, CONTEXT.md
+scripts/            build_season_spike.py (console tree via execute_season)
 ```
 
 ## Dev setup

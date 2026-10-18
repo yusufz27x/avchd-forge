@@ -193,6 +193,19 @@ ultimately `finished(JobResult)`:
 Cancellation kills the running child (not the whole group), marks the result
 `cancelled`, keeps the temp dir, and reports which file was left behind.
 
+A season run (`JobRunner.start_season`, built from a `SeasonRequest`) plans every
+episode first — each into its own scratch folder `<temp>/episode-NNN`, one
+`JobPlan` whose `output_dir` is exactly `<scratch>/AVCHD` — then hands the batch
+to `backend.execute_season`: mux and verify each tree on its own, merge them
+(`season.merge_avchd_trees`, moving rather than copying unless the temp dir is
+kept), one rename to the FAT32 names, one verification of the merged tree, one
+cleanup of the staging root (kept on failure/cancel; `docs/CONTEXT.md` D26/D27).
+The run bar weighs per episode `prep + mux` plus one merge unit.
+
+Terminal signals (`probed`, `finished`, `failed`, `cancelled`) are emitted *after*
+the runner is released, so a handler may start the next run — the window's probe
+queue reads a list of files that way.
+
 ### Drive awareness (`drives.py`)
 
 `list_drives()` prefers `lsblk -J -o …` (device, mountpoint, fstype, label,
@@ -216,8 +229,14 @@ names, so a second run into the same folder would overwrite the first title.
 
 ### UI (`ui/`)
 
-* **Input**: file picker button + `QLineEdit` (read-only) + drag-and-drop
-  (`dragEnterEvent`/`dropEvent` accepting exactly one file, validation on drop).
+* **Input**: an episode list (`QListWidget`, fixed height) holding one file per
+  title, in play order, with *Add files…* (multi-select picker), *Remove*,
+  *Move up* / *Move down* and drag-and-drop of one or more `.mkv/.ts` files.
+  Files are probed one at a time; each row shows the duration and how many
+  tracks the episode keeps, a probe that cannot answer marks its row, and the
+  highlighted row is what the track view edits. One listed file is the
+  single-title flow; two or more are a season — one `AVCHD/` folder, one title
+  per episode (D26/D27).
 * **Output**: directory picker with a drive combo listing detected removable
   drives plus a filesystem badge (`FAT32` / `not FAT32`) and inline warning.
 * **Tracks**: three panes — video info (read-only, level/bitrate flags rendered as
@@ -320,11 +339,19 @@ Ordered work:
    files. The console listed the tree, played episode 1 on insert, reached
    episode 2 via "Go To → Title 2" and restarted title 1 from the Top Menu
    button (D26/§2.13); the same run also confirmed the D22 rename.
-2. **GUI integration** (next) — accept several sources as one
-   season, one plan per source, merge in place of the single-tree rename, V20
-   revisited for "add episodes to an existing season folder", per-episode
-   progress and failure reporting, chapters per episode (the `custom_chapters` /
-   `auto_chapters_minutes` plumbing already exists in `meta.py`).
+2. **GUI integration** *(done, 2026-10-18)* — the source row is an episode list
+   (*Add files…*, a drop of several files, *Remove*, *Move up* / *Move down*);
+   probes run one file at a time, every episode keeps its own `TrackSelection`,
+   and Start builds a `SeasonRequest` for two or more files (`JobRequest` and
+   `start_job` for one, so the single-title flow is untouched).
+   `backend.execute_season` muxes each episode into its own scratch tree
+   (`<temp>/episode-NNN/AVCHD`), verifies it there, merges with `move=True`
+   unless the temp dir is kept, renames once and verifies the merged tree; the
+   run bar weighs per episode `prep + mux` plus one merge unit, and a failure
+   keeps the whole staging root as evidence. Per-episode chapters need nothing
+   new — each episode's plan carries its own meta text and options. "Add
+   episodes to an existing season folder" (the V20 revisit) stays deferred: a
+   v1 season refuses an existing tree and never touches one.
 3. **Authored top menu** (only if the console's title search proves unusable) —
    needs an HDMV/IG compiler, which no open-source tool provides and tsMuxeR
    cannot ingest; the title-table layout from step 1 is unchanged by it, so the

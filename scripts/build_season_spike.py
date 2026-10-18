@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Build a PS3-testable multi-title (season) AVCHD tree from episode files.
 
-Every episode goes through the application's own mux path (probe -> plan ->
-prepare -> tsMuxeR), the single-title trees are merged into one ``BDMV`` folder
-(``avchdforge.season``), renamed to the AVCHD-on-FAT32 names a PS3 mounts from
-USB and checked. The title table that was written is printed at the end.
+Every episode goes through the application's own mux path and the trees are
+merged by :func:`avchdforge.backend.execute_season` — the same call the GUI
+makes: probe -> plan -> prepare -> tsMuxeR per episode, each tree verified,
+then merged into one ``BDMV`` folder, renamed to the AVCHD-on-FAT32 names a PS3
+mounts from USB and verified as one tree. The title table that was written is
+printed at the end.
 
     .venv/bin/python scripts/build_season_spike.py --make-demos /tmp/episodes
     .venv/bin/python scripts/build_season_spike.py --out /tmp/season \\
@@ -43,7 +45,6 @@ from avchdforge.bdmv import (  # noqa: E402
 )
 from avchdforge.errors import AvchdForgeError, VerificationError  # noqa: E402
 from avchdforge.process import SubprocessRunner  # noqa: E402
-from avchdforge.season import MergedSeason, merge_avchd_trees  # noqa: E402
 from avchdforge.tooling import locate_tool  # noqa: E402
 
 FONT_CANDIDATES: Final[tuple[str, ...]] = (
@@ -140,64 +141,94 @@ def make_demos(
 # --------------------------------------------------------------------------
 
 
-def mux_episode(
+def echo_app_lines(line: str) -> None:
+    """Print avchd-forge's own log lines; raw tool output stays out of the transcript."""
+    if line.startswith(("[avchd-forge]", "$ ")):
+        print(line, end="")
+
+
+def build_season(
     runner: SubprocessRunner,
-    source: Path,
+    episodes: list[Path],
     work: Path,
-    number: int,
+    destination: Path,
     *,
     tsmuxer: str,
     ffmpeg: str,
     ffprobe: str,
-) -> Path:
-    """One episode through the application's mux path; returns its ``AVCHD`` folder."""
-    job = plan.plan_for_source(
-        source,
+    keep_work: bool,
+) -> backend.SeasonOutcome:
+    """Every episode through the application's season path; returns the outcome."""
+    plans = []
+    for number, source in enumerate(episodes, start=1):
+        scratch = work / f"episode{number:03d}"
+        print(f"plan:    episode {number} ({source.name})")
+        plans.append(
+            plan.plan_for_source(
+                source,
+                runner,
+                # A season plan muxes into <scratch>/AVCHD; execute_season
+                # requires exactly that (backend.py) and merges the scratch
+                # trees into one folder.
+                output_dir=scratch / plan.AVCHD_DIR_NAME,
+                temp_dir=scratch,
+                options=plan.PlanOptions(tsmuxer=tsmuxer, ffmpeg=ffmpeg),
+                ffprobe=ffprobe,
+            )
+        )
+    return backend.execute_season(
+        plans,
         runner,
-        output_dir=work / f"episode{number}",
-        temp_dir=work / f"episode{number}-tmp",
-        options=plan.PlanOptions(tsmuxer=tsmuxer, ffmpeg=ffmpeg),
+        destination=plan.avchd_destination(destination),
         ffprobe=ffprobe,
+        on_line=echo_app_lines,
+        on_stage=lambda stage: print(f"{stage.key:8} {stage.label}"),
+        keep_temp_on_success=keep_work,
+        owns_temp=False,  # the script owns ``work``; it reports or removes it itself
     )
-    job.temp_dir.mkdir(parents=True, exist_ok=True)
-    for step in job.prep_steps:
-        print(f"prepare: {step.label}")
-        backend.run_prep_step(job, step, runner, ffprobe=ffprobe)
-    print(f"mux:     episode {number} ({source.name})")
-    backend.run_mux(job, runner)
-    report = backend.check_output_tree(job.output_dir)
-    if not report.ok:
-        raise VerificationError(report.problems, job.output_dir)
-    return job.output_dir
 
 
-def report_titles(season: MergedSeason, episodes: list[Path]) -> None:
+def read_first(base: Path, *names: str) -> bytes:
+    """The bytes of the first of ``names`` that exists in ``base``.
+
+    execute_season ships the FAT32 flavour (``INDEX.BDM``), while a tree that
+    was never renamed has tsMuxeR's optical names (``index.bdmv``); the report
+    reads whichever is there.
+    """
+    for name in names:
+        path = base / name
+        if path.is_file():
+            return path.read_bytes()
+    raise VerificationError([f"neither {' nor '.join(names)} in {base}"], base)
+
+
+def report_titles(outcome: backend.SeasonOutcome, episodes: list[Path]) -> None:
     """Check the written title table against the episodes and print it."""
-    bdmv = season.root / "BDMV"
-    index = parse_index((bdmv / "index.bdmv").read_bytes())
-    objects = parse_movie_objects((bdmv / "MovieObject.bdmv").read_bytes())
+    bdmv = outcome.root / "BDMV"
+    index = parse_index(read_first(bdmv, "INDEX.BDM", "index.bdmv"))
+    objects = parse_movie_objects(read_first(bdmv, "MOVIEOBJ.BDM", "MovieObject.bdmv"))
     if len(index.titles) != len(episodes):
         raise VerificationError(
             [f"index has {len(index.titles)} titles for {len(episodes)} episodes"],
-            season.root,
+            outcome.root,
         )
     for number, (title, playlist) in enumerate(
-        zip(index.titles, season.playlists, strict=True), start=1
+        zip(index.titles, outcome.playlists, strict=True), start=1
     ):
         episode = objects[title.id_ref]
         if episode.commands[3] != play_playlist(playlist):
             raise VerificationError(
                 [f"title {number} object {title.id_ref} does not play playlist {playlist:05d}"],
-                season.root,
+                outcome.root,
             )
 
     print()
-    print(f"season tree: {season.root} ({season.title_count} titles)")
+    print(f"season tree: {outcome.root} ({len(outcome.playlists)} titles)")
     for number, (episode, playlist) in enumerate(
-        zip(episodes, season.playlists, strict=True), start=1
+        zip(episodes, outcome.playlists, strict=True), start=1
     ):
         print(f"  title {number}  playlist {playlist:05d}  <- {episode}")
-    parts = sorted((season.root / "BDMV/STREAM").iterdir())
+    parts = sorted((outcome.root / "BDMV" / "STREAM").iterdir())
     total = sum(part.stat().st_size for part in parts)
     print(f"  clips: {len(parts)} parts, {total / 1_000_000:.1f} MB")
     print("  first play -> title 1; top menu button -> title 1")
@@ -231,25 +262,17 @@ def build(args: argparse.Namespace) -> int:
     print(f"work:    {work}")
 
     try:
-        sources = [
-            mux_episode(
-                runner,
-                source,
-                work,
-                number,
-                tsmuxer=tsmuxer,
-                ffmpeg=ffmpeg,
-                ffprobe=ffprobe,
-            )
-            for number, source in enumerate(episodes, start=1)
-        ]
-        merged = merge_avchd_trees(sources, destination / "AVCHD")
-        report_titles(merged, episodes)
-        report = backend.check_output_tree(merged.root)
-        if not report.ok:
-            raise VerificationError(report.problems, merged.root)
-        renamed = backend.rename_tree_for_usb(merged.root)
-        print(f"  renamed {len(renamed)} files to the AVCHD-on-FAT32 names")
+        outcome = build_season(
+            runner,
+            episodes,
+            work,
+            destination,
+            tsmuxer=tsmuxer,
+            ffmpeg=ffmpeg,
+            ffprobe=ffprobe,
+            keep_work=args.keep_work,
+        )
+        report_titles(outcome, episodes)
     except BaseException:
         print(f"failed — scratch files kept in {work}", file=sys.stderr)
         raise
@@ -261,7 +284,7 @@ def build(args: argparse.Namespace) -> int:
 
     print()
     print("next steps")
-    print(f"  1. copy {merged.root} to the root of the FAT32 USB drive")
+    print(f"  1. copy {outcome.root} to the root of the FAT32 USB drive")
     print("  2. insert it into the PS3 — the XMB should list the AVCHD disc")
     print("  3. check playback, 'Go To -> Title X' and the Top Menu button")
     print("  4. record what happened in docs/CONTEXT.md before trusting it")
