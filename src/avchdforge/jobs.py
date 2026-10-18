@@ -343,7 +343,10 @@ class JobRunner(QtCore.QObject):
     The object is single-use at a time: ``start_*`` raises
     :class:`RuntimeError` while another call is still on the stack, which the UI
     cannot trigger because it disables its buttons, but tests and future callers
-    should not have to guess.
+    should not have to guess. Every terminal signal — ``probed``, ``finished``,
+    ``failed``, ``cancelled`` — goes out *after* the runner has been released,
+    so a handler may start the next run: the window reads a list of files one
+    probe at a time and does exactly that.
     """
 
     #: The job moved to another stage (``JobStage``).
@@ -398,6 +401,7 @@ class JobRunner(QtCore.QObject):
         self.stage_changed.emit(JobStage(key="probe", label=f"reading {path.name}"))
         self.line.emit(f"[avchd-forge] probing {path}\n")
         outcome: ProbeOutcome | None = None
+        failure: Exception | None = None
         try:
             media = probe(path, runner, tool=ffprobe)
             for row in describe_media(media):
@@ -410,8 +414,12 @@ class JobRunner(QtCore.QObject):
                 selection=selection,
             )
         except Exception as exc:
+            failure = exc
+        finally:
+            self._end()
+        if failure is not None:
             self._route_failure(
-                exc,
+                failure,
                 runner=runner,
                 stage="probing",
                 source=path,
@@ -419,8 +427,7 @@ class JobRunner(QtCore.QObject):
                 temp_dir=None,
                 keep_temp=False,
             )
-        finally:
-            self._end()
+            return
         if outcome is not None:
             self.probed.emit(outcome)
 
@@ -441,11 +448,16 @@ class JobRunner(QtCore.QObject):
         self.line.emit(f"[avchd-forge] temp   {temp_dir}\n")
 
         outcome: JobOutcome | None = None
+        failure: Exception | None = None
         try:
             outcome = self._mux(request, temp_dir, runner)
         except Exception as exc:
+            failure = exc
+        finally:
+            self._end()
+        if failure is not None:
             self._route_failure(
-                exc,
+                failure,
                 runner=runner,
                 stage=PLAN_STAGE_LABEL,
                 source=source,
@@ -453,8 +465,7 @@ class JobRunner(QtCore.QObject):
                 temp_dir=temp_dir,
                 keep_temp=request.keep_temp_on_failure,
             )
-        finally:
-            self._end()
+            return
         if outcome is not None:
             for row in describe_outcome(outcome):
                 self.line.emit(f"[avchd-forge] {row}\n")
@@ -502,11 +513,16 @@ class JobRunner(QtCore.QObject):
         self.line.emit(f"[avchd-forge] temp   {temp_dir}\n")
 
         outcome: SeasonOutcome | None = None
+        failure: Exception | None = None
         try:
             outcome = self._season(request, sources, temp_dir, runner)
         except Exception as exc:
+            failure = exc
+        finally:
+            self._end()
+        if failure is not None:
             self._route_failure(
-                exc,
+                failure,
                 runner=runner,
                 stage=SEASON_STAGE_LABEL,
                 source=None,
@@ -514,8 +530,7 @@ class JobRunner(QtCore.QObject):
                 temp_dir=temp_dir,
                 keep_temp=request.keep_temp_on_failure,
             )
-        finally:
-            self._end()
+            return
         if outcome is not None:
             for row in describe_season_outcome(outcome):
                 self.line.emit(f"[avchd-forge] {row}\n")

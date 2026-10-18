@@ -249,6 +249,40 @@ def test_probe_flags_unusable_media_without_failing(tmp_path: Path) -> None:
     assert any("H.264" in message for message in outcome.errors)
 
 
+def test_terminal_signals_arrive_with_the_runner_released(tmp_path: Path) -> None:
+    """A handler may start the next run: the runner is free before the signal."""
+    runner = FakeRunner()
+    runner.add_error("not a media file", returncode=1, match="ffprobe")
+    job = make_job(runner)
+    watcher = JobWatcher(job)
+    busy_in_handler: list[bool] = []
+    job.failed.connect(lambda _failure: busy_in_handler.append(job.busy))
+
+    job.start_probe(tmp_path / "broken.mkv")
+
+    assert watcher.events == ["stage:probe", "failed"]
+    assert busy_in_handler == [False]
+    assert not job.busy
+
+
+def test_a_handler_may_start_the_next_probe(tmp_path: Path) -> None:
+    """The window's probe queue reads a list of files exactly like this."""
+    runner = FakeRunner()
+    runner.add_error("not a media file", returncode=1, match="first.mkv")
+    runner.add_stdout(PROBE_JSON_TEXT, match="second.mkv")
+    job = make_job(runner)
+    watcher = JobWatcher(job)
+    job.failed.connect(lambda _failure: job.start_probe(tmp_path / "second.mkv"))
+
+    job.start_probe(tmp_path / "first.mkv")
+
+    assert [outcome.source.name for outcome in watcher.probed] == ["second.mkv"]
+    assert [failure.title for failure in watcher.failures] == [
+        "Could not read the input file"
+    ]
+    assert not job.busy
+
+
 def test_cancelled_probe_is_reported_as_cancellation(tmp_path: Path) -> None:
     runner = FakeRunner()
     runner.add(
