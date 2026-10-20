@@ -71,9 +71,10 @@ HD_DETECTION = parse_detect_output(
     "Stream lang: eng\n"
 )
 
-#: Audio 1 (DTS-HD MA), 3 (TrueHD with an embedded AC-3 core) and 5 (E-AC-3)
-#: all need an extraction step; audio 4 (the AC-3 core of 3) is not selected.
-HD_AUDIO_SELECTION = TrackSelection(audio=(1, 3, 5), subtitles=(6,))
+#: Audio 1 (DTS-HD MA) and 3 (TrueHD with an embedded AC-3 core) need an
+#: extraction step; audio 4 (the AC-3 core of 3) is not selected, and 5
+#: (E-AC-3) is refused because it cannot become AC-3 without a re-encode.
+HD_AUDIO_SELECTION = TrackSelection(audio=(1, 3), subtitles=(6,))
 
 
 def hd_media():

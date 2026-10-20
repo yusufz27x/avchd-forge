@@ -14,7 +14,7 @@ shape are copied from real output.
 | `ffprobe/mkv_720p_h264_aac_srt.json` | real | 720p60 at the AVCHD frame-rate ceiling, AAC (tolerated, not AVCHD-legal), SubRip |
 | `ffprobe/mkv_1080p_hevc.json` | real | HEVC source that validation must reject |
 | `ffprobe/ts_1080p_h264_dts.json` | real | MPEG-TS container, plain DTS (passthrough path) |
-| `ffprobe/mkv_1080p_dtshd_truehd_ac3core.json` | handcrafted | DTS-HD MA (→ `dca_core`), TrueHD without core (→ refuse), TrueHD with a separate AC-3 core stream (→ demux), E-AC-3, SubRip |
+| `ffprobe/mkv_1080p_dtshd_truehd_ac3core.json` | handcrafted | DTS-HD MA (→ `dca_core`), TrueHD without core (→ refuse), TrueHD with a separate AC-3 core stream (→ demux), E-AC-3 (→ refuse, cannot become AC-3 losslessly), SubRip |
 | `ffprobe/mkv_1440x1080i_h264_level51.json` | handcrafted | rule coverage: illegal resolution, interlaced, level 5.1, high bitrate, oversized PGS, VobSub |
 | `ffprobe/mkv_two_video_streams.json` | handcrafted | two video streams → hard error |
 | `ffprobe/mkv_720p_lpcm_multi.json` | handcrafted | LPCM 96 kHz and 8-channel LPCM warnings, AAC warning, PGS at 720p |

@@ -7,8 +7,8 @@ against without running anything. The rules that matter:
   (``-c:v copy -bsf:v h264_metadata=…``): the coded pictures are untouched, only
   the SPS is rewritten so the decoder shows rows that were always there;
 * audio cores are only ever *copied* through a bitstream filter
-  (``-c:a copy -bsf:a dca_core`` / ``eac3_core``) or demuxed (``-c:a copy``);
-  there is no encoder flag anywhere in this module;
+  (``-c:a copy -bsf:a dca_core``) or demuxed (``-c:a copy``); there is no
+  encoder flag anywhere in this module;
 * text subtitles become UTF-8 SubRip so tsMuxeR can render them to PGS, or a raw
   ``.sup`` when the installed FFmpeg really has a PGS encoder;
 * every produced file is verified afterwards with ffprobe
@@ -439,8 +439,8 @@ def check_prep_output(step: PrepStep, media: MediaInfo) -> str | None:
     """Return a problem description when ``media`` is not what ``step`` promised.
 
     Called with the result of probing the produced file. This is the guard that
-    stops a silently wrong extraction (an E-AC-3 stream with no AC-3 core, a
-    subtitle that came out empty) from reaching tsMuxeR.
+    stops a silently wrong extraction (an extension layer that was not stripped,
+    a subtitle that came out empty) from reaching tsMuxeR.
     """
     if not media.videos and not media.audio and not media.subtitles:
         return f"{step.output.name} contains no usable streams"

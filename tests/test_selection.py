@@ -156,6 +156,7 @@ def test_compatible_audio_indices_excludes_unsupported(hd_media):
     assert 1 in compatible, "DTS-HD MA is usable via dca_core"
     assert 2 not in compatible, "TrueHD without a core is not"
     assert 3 in compatible
+    assert 5 not in compatible, "E-AC-3 cannot become AC-3 without a re-encode"
 
 
 def test_selectable_subtitles_exclude_unsupported_codecs():

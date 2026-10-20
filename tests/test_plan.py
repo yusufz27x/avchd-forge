@@ -377,7 +377,6 @@ def test_prep_outputs_and_temp_files_cover_every_generated_file():
     assert plan.prep_outputs == (
         TEMP / "audio-1.dts",
         TEMP / "audio-3.ac3",
-        TEMP / "audio-5.ac3",
         TEMP / "sub-6.srt",
     )
     assert plan.temp_files == (*plan.prep_outputs, plan.meta_path)
@@ -386,8 +385,8 @@ def test_prep_outputs_and_temp_files_cover_every_generated_file():
 def test_one_prep_step_per_selected_stream_at_most():
     plan = build(hd_media(), HD_AUDIO_SELECTION, HD_DETECTION)
 
-    assert len(plan.prep_steps) == 4
-    assert len({step.output for step in plan.prep_steps}) == 4, "no two steps share a file"
+    assert len(plan.prep_steps) == 3
+    assert len({step.output for step in plan.prep_steps}) == 3, "no two steps share a file"
 
 
 # --------------------------------------------------------------------------
@@ -563,11 +562,10 @@ def test_every_track_carries_a_codec_family_and_language():
         "video",
         "audio",
         "audio",
-        "audio",
         "subtitle",
     ]
-    assert [track.family for track in plan.tracks] == ["avc", "dts", "ac3", "ac3", "pgs"]
-    assert [track.language for track in plan.tracks] == ["und", "eng", "fre", "ger", "eng"]
+    assert [track.family for track in plan.tracks] == ["avc", "dts", "ac3", "pgs"]
+    assert [track.language for track in plan.tracks] == ["und", "eng", "fre", "eng"]
 
 
 def test_channel_counts_are_recorded_for_audio_expectations():

@@ -124,7 +124,6 @@ def test_audio_core_argv_omits_the_filter_when_demuxing():
 def test_no_audio_encoder_is_ever_requested():
     for kwargs in (
         {"bsf": "dca_core", "container": "dts"},
-        {"bsf": "eac3_core", "container": "ac3"},
         {"bsf": None, "container": "ac3"},
     ):
         argv = build_audio_core_argv("ffmpeg", "in.mkv", 1, output="out.bin", **kwargs)
@@ -268,14 +267,12 @@ def test_coreless_truehd_produces_no_step(hd_media, tmp_path):
     assert steps == ()
 
 
-def test_eac3_produces_a_core_extraction_step(hd_media, tmp_path):
+def test_eac3_produces_no_step_because_it_cannot_become_ac3(hd_media, tmp_path):
     steps = plan_prep_steps(
         hd_media, TrackSelection(audio=(5,)), temp_dir=tmp_path, capabilities=CAPS_PLAIN
     )
 
-    assert len(steps) == 1
-    assert steps[0].argv[steps[0].argv.index("-bsf:a") + 1] == "eac3_core"
-    assert steps[0].output.suffix == ".ac3"
+    assert steps == ()
 
 
 def test_text_subtitle_converts_to_srt_without_a_pgs_encoder(ac3_media, tmp_path):

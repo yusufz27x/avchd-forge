@@ -274,9 +274,9 @@ def check_stream_composition(plan: JobPlan, output: MediaInfo) -> VerificationRe
     tsMuxeR reports success even when ``track=`` pointed at the wrong stream, so
     every planned stream must be found in the output, in the same order and with
     the expected codec family. Extracted cores are the exception to the channel
-    rule: stripping a DD+/Atmos or TrueHD extension can legitimately reduce the
-    channel count (``eac3_core`` "drops extra channels"), so those tracks only have
-    to be non-zero channel audio of the right family.
+    rule: stripping a DTS-HD or TrueHD extension can legitimately reduce the
+    channel count, so those tracks only have to be non-zero channel audio of the
+    right family.
     """
     problems: list[str] = []
     details: list[str] = []

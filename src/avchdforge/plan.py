@@ -87,7 +87,7 @@ class PlannedTrack:
 
     ``family`` is the ffprobe codec family the muxed stream must report, which
     is how the backend proves tsMuxeR kept the track (see module docstring) and
-    that anything that was DTS-HD/E-AC-3/TrueHD really arrived as a core.
+    that anything that was DTS-HD/TrueHD really arrived as a core.
     """
 
     kind: TrackKind

@@ -236,7 +236,8 @@ def validate_selection(
             )
             continue
         if not decision.supported:
-            collect.error("V12", f"Audio stream {index}: {decision.note}", index)
+            code = "V12" if track.codec in {"truehd", "mlp"} else "V10"
+            collect.error(code, f"Audio stream {index}: {decision.note}", index)
             continue
         if not track.channels:
             collect.error(

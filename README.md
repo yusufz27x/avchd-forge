@@ -8,9 +8,9 @@ avchd-forge is a PySide6 desktop application that:
 
 * probes the source with `ffprobe` and shows Video / Audio / Subtitle panes,
 * lets you pick exactly which audio and subtitle tracks go onto the disc,
-* extracts DTS or AC-3 **cores** with `ffmpeg` bitstream filters when the selected
-  track is an HD flavour (DTS-HD MA, E-AC-3/Atmos) — bitstream-lossless, no
-  re-encode,
+* extracts DTS **cores** with `ffmpeg` bitstream filters when the selected track
+  is DTS-HD MA/HRA or DTS:X — bitstream-lossless, no re-encode; DD+/E-AC-3 is
+  refused because it cannot become AVCHD's AC-3 that way,
 * writes a tsMuxeR `.meta` file and muxes an AVCHD tree, splitting the output at
   4096 MB so it survives FAT32 (default on),
 * verifies the produced `BDMV/` tree and its stream composition before declaring
@@ -25,8 +25,9 @@ log pane:
    inventory.
 2. **validate** — the compatibility rules below, as errors (block) or warnings
    (inform only).
-3. **prep** — selected DTS-HD/TrueHD/E-AC-3 tracks are losslessly core-extracted,
-   and text subtitles are converted, with `ffmpeg` into a private temp directory.
+3. **prep** — selected DTS-HD tracks are losslessly core-extracted, TrueHD uses
+   its companion AC-3 core when present, and text subtitles are converted, with
+   `ffmpeg` into a private temp directory.
 4. **mux** — a `.meta` file is generated (`MUXOPT --avchd … --split-size=4096MB`)
    and `tsMuxeR <meta> <output>` writes the `BDMV/` + `CERTIFICATE/` tree into
    an `AVCHD` folder it creates inside the chosen folder (unless that folder is
@@ -135,7 +136,7 @@ Warnings: H.264 level above 4.1, 1080-line frame rate above 30 (720-line above
 | --- | --- |
 | AC-3, DTS, LPCM, AAC | copied as-is |
 | DTS-HD MA / HRA / DTS:X | DTS core extracted (`dca_core`), then copied |
-| E-AC-3 / Dolby Atmos (DD+) | AC-3 core extracted (`eac3_core`), then copied |
+| E-AC-3 / Dolby Atmos (DD+) | refused: AVCHD carries AC-3, and FFmpeg's `eac3_core` only drops extension channels—it does not turn E-AC-3 into AC-3 without a re-encode |
 | TrueHD | the AC-3 core ffprobe exposes inside the TrueHD stream is demuxed and copied; if there is no embedded core the track is refused with a reason instead of being re-encoded |
 | anything else (FLAC, Opus, …) | refused, with the reason in the row tooltip |
 

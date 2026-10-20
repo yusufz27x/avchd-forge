@@ -63,7 +63,7 @@ The argv asks for `-show_data` so the video stream's `extradata` hexdump reaches
 | V7 | `field_order` interleaved/`tt`/`bb` (interlaced input) | warning |
 | V8 | video bitrate > 24 Mbps | warning |
 | V9 | at least one audio track selected | error |
-| V10 | selected audio codec is AVCHD-legal (`ac3`, `dts`, `lpcm`/`pcm_*`) | warning (AAC) |
+| V10 | selected audio codec is AVCHD-legal (`ac3`, `dts`, `lpcm`/`pcm_*`); AAC is tolerated, E-AC-3/DD+ and other codecs are refused | warning (AAC) / error |
 | V11 | LPCM sample rate ≠ 48 kHz, or > 6 channels | warning |
 | V12 | TrueHD selected but no AC-3 core available | error |
 | V13 | PGS subtitle dimensions > 1920×1080 | warning |
@@ -134,7 +134,7 @@ instead of quietly muxing a broken stream.
 | --- | --- | --- |
 | `ac3`, `dts` (core/HRA without XLL), `aac`, `pcm_*` | passthrough | tsMuxeR reads the source file directly |
 | `dts` + DTS-HD extension (`profile` XLL/HRA) | extract core to temp `.dts` | `ffmpeg -i src -map 0:<i> -c:a copy -bsf:a dca_core -f dts out.dts` |
-| `eac3` (Dolby Digital Plus / Atmos, has core) | extract AC-3 core to temp `.ac3` | `ffmpeg -i src -map 0:<i> -c:a copy -bsf:a eac3_core -f ac3 out.ac3` |
+| `eac3` (Dolby Digital Plus / Atmos) | refused: AVCHD carries AC-3, and `eac3_core` leaves the packets as E-AC-3 (it only drops extension channels) | — |
 | `truehd` with separate `ac3` core stream reported by ffprobe | demux that stream to temp `.ac3` | `ffmpeg -i src -map 0:<ac3-index> -c:a copy -f ac3 out.ac3` |
 | `truehd` without detectable core | refused in the UI (V12) | — |
 
@@ -266,7 +266,7 @@ names, so a second run into the same folder would overwrite the first title.
 3. `feat(core): validate media and track selections against AVCHD rules`
 4. `feat(meta): generate tsMuxeR meta files (+ golden files)`
 5. `feat(core): build a JobPlan from media, selection and options`
-6. `feat(audio): ffmpeg argv for DTS-HD/E-AC-3/TrueHD core extraction`
+6. `feat(audio): ffmpeg argv for DTS-HD core and TrueHD companion-core handling`
 7. `feat(subs): subtitle conversion argv with PGS-capability fallback`
 8. `feat(process): Runner protocol, subprocess runner and progress parsers`
 9. `feat(tools): tool discovery, version and capability probing`
@@ -312,8 +312,14 @@ names, so a second run into the same folder would overwrite the first title.
    for TrueHD. Approved behaviour: if ffprobe exposes the TrueHD track's embedded
    AC-3 core as its own `ac3` stream, demux that stream (still copy, no re-encode);
    otherwise the track is refused in the UI with an explicit reason instead of
-   silently re-encoding. `dca_core` (DTS-HD → DTS) and `eac3_core` (DD+ → AC-3)
-   behave exactly as the brief assumes and are used as specified.
+   silently re-encoding. `dca_core` (DTS-HD → DTS) behaves as the brief assumes.
+3. **`eac3_core` does not produce AC-3.** It trims an E-AC-3 stream to its
+   independent substream and drops dependent substreams, but the packets keep
+   their E-AC-3 headers (`codec_id` stays `eac3`), so `-f ac3` fails with
+   *"ac3 muxer supports only codec ac3 for type audio"*. AVCHD carries AC-3 only,
+   so E-AC-3/DD+ tracks are refused with an explicit reason; converting them
+   would need a re-encode. This was reproduced with a real DD+ Blu-ray track,
+   whose tsMuxeR detection also reports `EAC3 … (core 0Kbps)`.
 
 ## 5. Risks / open items
 

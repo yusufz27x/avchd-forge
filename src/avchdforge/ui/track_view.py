@@ -4,8 +4,9 @@ Layout: the video summary on top (codec, level, resolution, frame rate, bitrate,
 with the level, interlacing and bitrate flags coloured), then the audio table,
 then the subtitle table. Audio and subtitle rows carry a checkbox in the first
 column; rows the pipeline cannot use are *disabled* and explain themselves in a
-tooltip (TrueHD without an embedded AC-3 core is the interesting one), and text
-subtitles say ``→ PGS (converted)`` so nobody expects a passthrough.
+tooltip (TrueHD without an embedded AC-3 core and E-AC-3/DD+ are the interesting
+ones), and text subtitles say ``→ PGS (converted)`` so nobody expects a
+passthrough.
 
 Two kinds of code meet here, deliberately separated:
 

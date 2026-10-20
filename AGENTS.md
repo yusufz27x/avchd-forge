@@ -13,9 +13,10 @@ releases into a **PS3-compatible AVCHD `BDMV/` folder structure** on an external
 ## Golden rules
 
 1. **No transcoding, ever.** Video is copied bit-for-bit. Audio is copied, or when
-   the container must carry a compatible flavour (DTS-HD MA, TrueHD, E-AC-3/Atmos),
-   only lossless *bitstream-filter* core extraction is allowed. Subtitles are copied
-   or converted; never burned in.
+   the container must carry a compatible flavour (DTS-HD MA, TrueHD), only lossless
+   *bitstream-filter* core extraction is allowed. E-AC-3/DD+ cannot be turned into
+   AVCHD's AC-3 losslessly and is refused. Subtitles are copied or converted; never
+   burned in.
 2. **Never block the UI.** Every external process (`tsMuxeR`, `ffmpeg`, `ffprobe`)
    runs through `QProcess` and reports by signal. Synchronous `subprocess.run` is
    only allowed behind the plain-`Runner` used by the non-GUI core and tests.

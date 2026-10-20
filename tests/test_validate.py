@@ -316,6 +316,15 @@ def test_v12_blocks_coreless_truehd_selection():
     assert report.ok is False
 
 
+def test_v10_blocks_eac3_selection():
+    media = parse_ffprobe_json(load_json("mkv_1080p_dtshd_truehd_ac3core.json"))
+    report = validate_selection(media, TrackSelection(audio=(5,)))
+
+    assert "V10" in codes(report, "error")
+    assert report.ok is False
+    assert "re-encode" in issue(report, "V10").message
+
+
 def test_truehd_with_core_can_be_selected():
     media = parse_ffprobe_json(load_json("mkv_1080p_dtshd_truehd_ac3core.json"))
     report = validate_selection(media, TrackSelection(audio=(3,)))

@@ -67,7 +67,6 @@ AVCHD_LPCM_MAX_CHANNELS: Final[int] = 6
 #: Codec tags used by tsMuxeR meta files.
 TSMUXER_AUDIO_TAGS: Final[dict[str, str]] = {
     "ac3": "A_AC3",
-    "eac3": "A_AC3",  # only after eac3_core produced an AC-3 stream
     "dts": "A_DTS",
     "aac": "A_AAC",
     "lpcm": "A_LPCM",

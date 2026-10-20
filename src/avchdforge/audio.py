@@ -4,8 +4,10 @@ AVCHD allows AC-3, DTS and LPCM. Sources may carry flavours that need their
 extension layer removed first:
 
 * **DTS-HD MA / HRA / DTS:X** → keep the DTS core (``-bsf:a dca_core``).
-* **E-AC-3 (Dolby Digital Plus / Atmos)** → keep the AC-3 core
-  (``-bsf:a eac3_core``).
+* **E-AC-3 (Dolby Digital Plus / Atmos)** → refused. AVCHD carries AC-3, not
+  E-AC-3, and FFmpeg's ``eac3_core`` filter only drops extension channels: the
+  packets stay E-AC-3, so it does not yield an AC-3 track. Turning DD+ into
+  AC-3 needs a re-encode.
 * **TrueHD** → there is no FFmpeg bitstream filter that yields an AC-3 core
   (``truehd_core`` only drops Atmos data), so we use the AC-3 stream that the
   container exposes next to the TrueHD track when it exists, and refuse the track
@@ -30,7 +32,6 @@ class AudioAction(str, Enum):
 
     PASSTHROUGH = "passthrough"
     DTS_CORE = "extract-dts-core"
-    EAC3_CORE = "extract-eac3-core"
     AC3_CORE_DEMUX = "demux-ac3-core"
     UNSUPPORTED = "unsupported"
 
@@ -39,7 +40,7 @@ class AudioAction(str, Enum):
 
     @property
     def needs_ffmpeg(self) -> bool:
-        return self in {AudioAction.DTS_CORE, AudioAction.EAC3_CORE, AudioAction.AC3_CORE_DEMUX}
+        return self in {AudioAction.DTS_CORE, AudioAction.AC3_CORE_DEMUX}
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +52,7 @@ class AudioDecision:
     codec: str
     resulting_codec: str
     mux_codec_tag: str | None = None
-    #: ffmpeg ``-bsf:a`` value (``dca_core``/``eac3_core``) or ``None``.
+    #: ffmpeg ``-bsf:a`` value (``dca_core``) or ``None``.
     bsf: str | None = None
     #: ffmpeg ``-f`` value for the extracted elementary stream.
     container: str | None = None
@@ -80,7 +81,6 @@ class AudioDecision:
             return self.note or "unsupported"
         names = {
             AudioAction.DTS_CORE: "DTS core",
-            AudioAction.EAC3_CORE: "AC-3 core",
             AudioAction.AC3_CORE_DEMUX: "embedded AC-3 core",
         }
         return f"{names[self.action]} → {self.resulting_label}"
@@ -145,15 +145,16 @@ def decide_audio(media: MediaInfo, track: AudioTrack) -> AudioDecision:
     if codec == "eac3":
         return AudioDecision(
             source_index=track.index,
-            action=AudioAction.EAC3_CORE,
+            action=AudioAction.UNSUPPORTED,
             codec=codec,
-            resulting_codec="ac3",
-            mux_codec_tag="A_AC3",
-            bsf="eac3_core",
-            container="ac3",
-            output_suffix=".ac3",
-            expected_codec="ac3",
-            note="E-AC-3: extracting the AC-3 core (eac3_core)",
+            resulting_codec=codec,
+            note=(
+                "E-AC-3 (Dolby Digital Plus) cannot be carried in AVCHD, and "
+                "ffmpeg's eac3_core filter does not convert it to AC-3: it only "
+                "drops extension channels and still writes E-AC-3. Producing "
+                "AC-3 would need a re-encode, which avchd-forge never does. "
+                "Pick the DTS core or an AC-3 track instead."
+            ),
         )
 
     if codec == "dts":

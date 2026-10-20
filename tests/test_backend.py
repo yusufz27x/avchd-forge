@@ -479,7 +479,7 @@ def test_composition_rejects_a_subtitle_that_stayed_text(tmp_path: Path) -> None
 
 
 def test_composition_tolerates_core_channel_reduction(tmp_path: Path) -> None:
-    """A DD+/Atmos core may legitimately have fewer channels than the source."""
+    """A DTS-HD/TrueHD core may legitimately have fewer channels than the source."""
     plan = dts_hd_plan(tmp_path)
     # 5.1 DTS-HD MA → 2.0 DTS core: family matches, channel count drops.
     output = parse_ffprobe_json(

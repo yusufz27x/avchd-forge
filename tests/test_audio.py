@@ -117,17 +117,20 @@ def test_any_dts_hd_profile_goes_through_dca_core(profile):
     assert decision.bsf == "dca_core"
 
 
-def test_eac3_extracts_ac3_core(hd_media):
+def test_eac3_is_refused_because_eac3_core_does_not_make_it_ac3(hd_media):
     eac3 = hd_media.audio[4]
 
     decision = decide_audio(hd_media, eac3)
 
-    assert decision.action is AudioAction.EAC3_CORE
-    assert decision.bsf == "eac3_core"
-    assert decision.container == "ac3"
-    assert decision.expected_codec == "ac3"
-    assert decision.mux_codec_tag == "A_AC3"
+    assert decision.action is AudioAction.UNSUPPORTED
+    assert decision.supported is False
+    assert decision.needs_extraction is False
+    assert decision.bsf is None
+    assert decision.container is None
+    assert decision.mux_codec_tag is None
     assert decision.source_index == eac3.index
+    assert "eac3_core" in decision.note
+    assert "re-encode" in decision.note
 
 
 def test_truehd_without_core_is_refused(hd_media):

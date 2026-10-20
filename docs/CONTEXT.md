@@ -109,7 +109,14 @@ reject zero-channel audio streams. `Mux successful complete` alone is not proof.
 * `dca_core` — *"Extract the core from a DCA/DTS stream, dropping extensions such as
   DTS-HD"* (upstream docs). Verified working: plain DTS in → DTS out, unchanged size.
 * `eac3_core` — *"Extract the core from a E-AC-3 stream, dropping extra channels"*
-  (upstream docs); this is the DD+/Atmos → AC-3-core path.
+  (upstream docs). It is **not** an E-AC-3 → AC-3 converter: `eac3_core_bsf.c`
+  trims packets to the independent substream but never changes the output codec
+  id (still `eac3`), so `-c:a copy -bsf:a eac3_core -f ac3` always fails at the
+  muxer with *"ac3 muxer supports only codec ac3 for type audio"*. Reproduced on
+  7.1.5 with both a lavfi-generated DD+ stream and a real Blu-ray DD+ track
+   (960 kbps, `strmtyp` 0 / `bsid` 16, i.e. even its `AC3_CONVERT` frames stay
+  E-AC-3). tsMuxeR 2.7.0 detects the same selection as
+  `E-AC3 (DD+) … (core 0Kbps)`, not AC-3.
 * `truehd_core` — *"Extract the core from a TrueHD stream, dropping ATMOS data"*
   (upstream docs). It does **not** yield an AC-3 core; there is no FFmpeg AC-3-core
   extractor for TrueHD. Our TrueHD strategy therefore is: use the AC-3 stream that
@@ -120,13 +127,11 @@ reject zero-channel audio streams. `Mux successful complete` alone is not proof.
   tests over canned ffprobe output.
 * Subtitle/text handling: SRT/ASS → SRT via `-f srt -c:s srt` is lossless enough for
   rendering, and tsMuxeR needs UTF-8/16/32 SRT input.
-* E-AC-3 without an AC-3 core: `-bsf:a eac3_core -f ac3` **fails at the muxer**
-  ("ac3 muxer supports only codec ac3 for type audio") and leaves behind a file
-  that ffprobe reports as `ac3` with **0 channels** — verified with a
-  lavfi-generated DD+ stream. Two independent guards therefore fire for a
-  coreless source: ffmpeg's non-zero exit and `prep.check_prep_output`'s
-  channel check. This is the expected, explicit failure rather than a silent
-  wrong mux.
+* `eac3_core` leaves a zero-byte output behind and ffmpeg exits 234 (7.1.5).
+  `prep.check_prep_output`'s channel check is the second guard if a build ever
+  "succeeds" with an empty/0-channel file. AVCHD only accepts AC-3, so the
+  decision layer refuses E-AC-3/DD+ tracks with an explicit reason before any
+  ffmpeg call (D30), rather than trying a conversion that cannot work losslessly.
 
 ### 2.4 SRT → PGS actually works (chosen fallback, verified)
 
@@ -470,6 +475,7 @@ uses exactly the tree the feature ships and cannot drift from the GUI path.
 | D27 | 2026-10-18 | The source row is an **episode list** (one file per title; list order = title order) and the only input path: exactly one listed file builds a `JobRequest` → `start_job` (the unchanged single-title flow), two or more build a `SeasonRequest` → `start_season` → `backend.execute_season`. Each episode keeps its own `TrackSelection`; probes run one file at a time and a probe that cannot answer marks its row and blocks Start; a batch is sorted with `natural_key` because a drop carries no order of its own; every season plan has `output_dir == temp_dir/AVCHD` under `<temp>/episode-NNN`, the season's chosen folder is checked for V20 once in `_season` before any tool runs, and the run bar weighs per episode `prep + mux` plus one merge unit | a season needs per-episode selections — episode 2's tracks are not episode 1's — and routing the one-file case through the unchanged job path is what keeps D26's byte-identical guarantee meaningful in the GUI. V20 stays refusal-only for v1: "add episodes to an existing season folder" would need in-place renumbering of a tree the app did not write, which is exactly what V20 promises never to do silently |
 | D28 | 2026-10-18 | `JobRunner` releases its runner **before** it emits `probed`, `finished`, `failed` or `cancelled`: the exception is captured, `_end()` runs, then the failure is routed and emitted | the window reads a list of files one probe at a time and starts the next probe from the failure handler, while `start_*` refuses to run while `busy`; emitting first forced every such caller to defer through the event loop (and its tests to spin it), so the ordering is a documented contract instead of an accident of `finally` |
 | D29 | 2026-10-18 | A season is built **one episode at a time** (`season.SeasonBuilder`): `execute_season` muxes, verifies and adds each episode to the season folder, then drops that episode's scratch, so the temp directory holds about one episode instead of the whole season. Transfers run in `TRANSFER_BLOCK = 4 MiB` blocks (a same-filesystem move is still one rename per file) and call `should_cancel`/`pump` between blocks — `jobs.py` passes `QCoreApplication.processEvents`, which is what keeps the window painting and Cancel clickable during the merge — and an interrupted transfer removes its half-written destination file. Failure semantics change with it: a season that fails or is cancelled part-way leaves the episodes already merged in the output folder (a partial season, deleted before a retry) and keeps the scratch of the episodes not merged. `keep_temp_on_success` still means "keep the whole staged season", so that mode still copies and still needs room for all of it. The first episode goes through the same renumbering path with an identity mapping (bytes unchanged), `merge_avchd_trees` stays the batch API with its "validate every source before the first byte" guarantee, and before every episode's prep/mux `check_temp_space` compares `temp_space_needed` (source-sized repaired stream, source-sized staged mux tree when the mux writes into temp, plus `TEMP_HEADROOM = 1 GiB`) with `drives.free_bytes`; a tool's ENOSPC is caught too (`looks_like_no_space`: exit code 228/28 or the usual wordings) and surfaces as `OutOfSpaceError` naming the folder, with a tmpfs call-out when the temp folder is memory-backed and a "Not enough free space" failure title in the UI | the reporter's 13-episode run froze the window for the whole merge — `shutil.move` copies multi-GB clips inline on the GUI thread with no event pumping, so nothing repaints and Cancel is inert until the copy ends (their only way out was the window manager's *Wait*; the earlier `Killed` was Force Quit, not the OOM killer) — and the run then died with ffmpeg's `228`, which is ENOSPC truncated to a byte: their temp directory was `/tmp`, a 7.6 GiB tmpfs, while the run staged all 137.7 GB of muxed episodes there before merging. One-episode staging removes the whole-season footprint, the pump makes the one remaining long copy interruptible, and naming the folder turns "ffmpeg exit 228" into "free space or point Temporary files elsewhere" |
+| D30 | 2026-10-20 | E-AC-3/DD+ tracks are **refused** (`AudioAction.UNSUPPORTED`, V10) instead of planned through `eac3_core`; `AudioAction.EAC3_CORE`, its tag and prep path are removed. The UI shows the reason in the row tooltip and default selection skips them | `eac3_core` extracts the E-AC-3 independent substream but does not convert it to AC-3, so the old command always died in the ac3 muxer. AVCHD carries AC-3 only and avchd-forge never re-encodes, so the only truthful verdict is "pick another track" (usually the DTS core). Reproduced with a real DD+ Blu-ray track and tsMuxeR 2.7.0, which also reports `core 0Kbps` |
 
 ## 4. Open items
 
@@ -485,11 +491,10 @@ uses exactly the tree the feature ships and cannot drift from the GUI path.
   crop). Follow-up worth doing: sample the luma of the rows a repair would
   expose (one decoded frame is enough) and warn when they are not (near-)black,
   i.e. when the release cropped picture rather than bars.
-* Core extraction cannot be exercised end-to-end with generated media: ffmpeg's
-  own `eac3` encoder writes no AC-3 core (so `eac3_core` has nothing to emit,
-  checked on 7.1.5) and there is no DTS-HD or TrueHD *encoder* at all. Those two
-  paths are pinned by argv/unit tests only; a real Blu-ray sample would be
-  needed for a live run.
+* Core extraction cannot be exercised end-to-end with generated media: there is
+  no DTS-HD or TrueHD *encoder* in this build, so those paths are pinned by
+  argv/unit tests only; a real Blu-ray sample would be needed for a live run.
+  E-AC-3 is no longer a core-extraction path at all (D30).
 * Windows/macOS drive detection is best-effort via `os.listdrives`/`lsblk` fallback.
 * Season support is PS3-verified for the *layout* (§2.13) but not yet for the GUI
   path built on it (§2.14): the console run used the spike tree, and no real
