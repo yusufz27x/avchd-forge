@@ -25,7 +25,7 @@ import tempfile
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
-from PySide6 import QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from ..backend import FAT32_MAX_BYTES, SPLIT_MB_BYTES, SPLIT_OVERSHOOT_ALLOWANCE
 from ..constants import DEFAULT_FONT_SIZE
@@ -33,13 +33,16 @@ from ..errors import AvchdForgeError
 from ..prep import SubtitleStyle
 from ..settings import AppSettings
 from ..tooling import FFMPEG, FFPROBE, TSMUXER, ToolReport
+from . import theme
 
 #: Manager for a tool check with explicit overrides (``MainWindow.check_tools``).
 ToolChecker = Callable[[Mapping[str, Path] | None], ToolReport]
 
-STATUS_OK = "color: #1e8449;"
-STATUS_WARN = "color: #9a6b00;"
-STATUS_BAD = "color: #c0392b;"
+#: The light-palette status colours, kept as the stylesheet strings the tests
+#: and callers know; the dialog derives dark ones from its own palette.
+STATUS_OK = f"color: {theme.LIGHT_OK_TEXT};"
+STATUS_WARN = f"color: {theme.LIGHT_WARNING_TEXT};"
+STATUS_BAD = f"color: {theme.LIGHT_ERROR_TEXT};"
 
 #: Largest split target that still cannot produce an illegal chunk. tsMuxeR's "MB"
 #: is 10^6 bytes and it splits at the first keyframe *after* the target, so a chunk
@@ -75,6 +78,9 @@ class PreferencesDialog(QtWidgets.QDialog):
         self._tool_check = tool_check
         self.tool_edits: dict[str, QtWidgets.QLineEdit] = {}
         self.tool_status: dict[str, QtWidgets.QLabel] = {}
+        #: Per-tool semantic state (``"ok"``/``"warn"``/``"bad"``), so a palette
+        #: change can recolour the labels without rebuilding their text.
+        self._status_roles: dict[str, str] = {}
 
         self.setWindowTitle("Preferences")
         self.setModal(True)
@@ -348,9 +354,10 @@ class PreferencesDialog(QtWidgets.QDialog):
         """Show each tool's version and path (or why it was not found)."""
         self._tool_report = report
         if report is None:
+            self._status_roles.clear()
             for label in self.tool_status.values():
                 label.setText("not checked yet")
-                label.setStyleSheet("")
+            self._apply_tool_status_colours()
             return
         for tool in report.tools:
             label = self.tool_status.get(tool.name)
@@ -358,18 +365,42 @@ class PreferencesDialog(QtWidgets.QDialog):
                 continue
             if not tool.found:
                 label.setText(tool.reason or "not found")
-                label.setStyleSheet(STATUS_BAD)
+                self._status_roles[tool.name] = "bad"
             elif tool.warning:
                 label.setText(tool.warning)
-                label.setStyleSheet(STATUS_WARN)
+                self._status_roles[tool.name] = "warn"
             else:
                 label.setText(f"{tool.version or 'version unknown'} — {tool.path}")
-                label.setStyleSheet(STATUS_OK)
+                self._status_roles[tool.name] = "ok"
+        self._apply_tool_status_colours()
 
     def _set_tool_status_message(self, text: str) -> None:
         for label in self.tool_status.values():
             label.setText(text)
-            label.setStyleSheet(STATUS_BAD)
+        self._status_roles = dict.fromkeys(self.tool_status, "bad")
+        self._apply_tool_status_colours()
+
+    def _apply_tool_status_colours(self) -> None:
+        """Repaint the status column with colours derived from the current palette."""
+        colors = theme.severity_colors(self.palette())
+        styles = {
+            "ok": f"color: {colors.ok};",
+            "warn": f"color: {colors.warning};",
+            "bad": f"color: {colors.error};",
+        }
+        for name, label in self.tool_status.items():
+            label.setStyleSheet(styles.get(self._status_roles.get(name, ""), ""))
+
+    def changeEvent(self, event: QtCore.QEvent) -> None:
+        """Re-derive the literal status colours when the palette changes."""
+        super().changeEvent(event)
+        if event.type() not in (
+            QtCore.QEvent.Type.PaletteChange,
+            QtCore.QEvent.Type.StyleChange,
+        ):
+            return
+        if hasattr(self, "tool_status") and hasattr(self, "_status_roles"):
+            self._apply_tool_status_colours()
 
     # ------------------------------------------------------------------
     # pickers

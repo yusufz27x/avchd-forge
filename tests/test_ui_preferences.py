@@ -33,6 +33,7 @@ from avchdforge.errors import ToolNotFoundError
 from avchdforge.prep import SubtitleStyle
 from avchdforge.settings import AppSettings, settings_for
 from avchdforge.tooling import FFMPEG, FFPROBE, TSMUXER, ToolInfo, ToolReport
+from avchdforge.ui import theme
 from avchdforge.ui.preferences import (
     MAX_SPLIT_SIZE_MB,
     STATUS_BAD,
@@ -41,6 +42,8 @@ from avchdforge.ui.preferences import (
     TABS,
     PreferencesDialog,
 )
+
+from .conftest import dark_palette, text_contrast
 
 pytestmark = pytest.mark.usefixtures("qapp")
 
@@ -305,6 +308,29 @@ def test_the_tool_column_shows_versions_warnings_and_reasons(tmp_path: Path) -> 
         == "/opt/ffprobe exists but is not executable (chmod +x it)"
     )
     assert dialog.tool_status[FFPROBE].styleSheet() == STATUS_BAD
+
+
+def test_the_tool_column_stays_readable_after_a_switch_to_dark_mode(
+    tmp_path: Path, qapp
+) -> None:
+    dialog, _settings = make_dialog(tmp_path)
+    dialog.set_tool_report(tool_report())
+    dialog.show_tab("tools")
+    dialog.show()
+    original = qapp.palette()
+
+    qapp.setPalette(dark_palette())
+    try:
+        qapp.processEvents()
+        colors = theme.severity_colors(qapp.palette())
+        assert dialog.tool_status[TSMUXER].styleSheet() == f"color: {colors.ok};"
+        assert dialog.tool_status[FFMPEG].styleSheet() == f"color: {colors.warning};"
+        assert dialog.tool_status[FFPROBE].styleSheet() == f"color: {colors.error};"
+        for label in dialog.tool_status.values():
+            assert text_contrast(label) > 3
+    finally:
+        dialog.close()
+        qapp.setPalette(original)
 
 
 def test_check_now_passes_the_typed_paths_and_stores_nothing(tmp_path: Path) -> None:

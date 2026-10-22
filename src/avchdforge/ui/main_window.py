@@ -72,14 +72,15 @@ from ..settings import AppSettings
 from ..tooling import FFPROBE, ToolReport, check_toolchain
 from ..validate import validate_all
 from ..validate_types import ValidationReport
+from . import theme
 from .log_pane import LogPane
 from .preferences import PreferencesDialog
 from .tool_gate import CONTINUE, PREFERENCES, QUIT, ToolGateDialog
-from .track_view import ERROR_COLOR, WARNING_COLOR, TrackView
+from .track_view import TrackView
 
-#: Badge colour for a FAT32 target (green), and for everything else.
-BADGE_OK_COLOR = "#1e8449"
-BADGE_UNKNOWN_COLOR = "#6c757d"
+#: The light-palette badge colours; dark ones are derived from the widget palette.
+BADGE_OK_COLOR = theme.LIGHT_OK_TEXT
+BADGE_UNKNOWN_COLOR = theme.LIGHT_MUTED_TEXT
 
 #: Placeholder entry at the top of the drive combo (no drive selected).
 DRIVE_PLACEHOLDER = "Detected drives…"
@@ -218,6 +219,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._assess_output()
         self._update_actions()
         self._update_status()
+
+    def changeEvent(self, event: QtCore.QEvent) -> None:
+        """Re-derive literal colours after a palette/style change."""
+        super().changeEvent(event)
+        if event.type() in (
+            QtCore.QEvent.Type.PaletteChange,
+            QtCore.QEvent.Type.StyleChange,
+        ) and hasattr(self, "badge_label"):
+            self._apply_target_style()
 
     # ------------------------------------------------------------------
     # construction
@@ -854,8 +864,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if target is None:
             self._target = None
             self.badge_label.setText("no output chosen")
-            self.badge_label.setStyleSheet(f"color: {BADGE_UNKNOWN_COLOR};")
             self.output_warning.setVisible(False)
+            self._apply_target_style()
             return
         report = assess_target(
             target,
@@ -865,14 +875,27 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._target = report
         self.badge_label.setText(report.badge)
-        color = BADGE_OK_COLOR if report.is_fat32 else BADGE_UNKNOWN_COLOR
-        self.badge_label.setStyleSheet(f"color: {color};")
         messages = report.messages()
         self.output_warning.setText("\n".join(messages))
-        self.output_warning.setStyleSheet(
-            f"color: {ERROR_COLOR if report.has_error else WARNING_COLOR};"
-        )
         self.output_warning.setVisible(bool(messages))
+        self._apply_target_style()
+
+    def _apply_target_style(self) -> None:
+        """Colour the badge and the inline warning for the current palette.
+
+        Called again from ``changeEvent``: a style sheet keeps the literal colour
+        it was given, so a theme change while the window is open would otherwise
+        leave dark green/grey text on a dark window.
+        """
+        colors = theme.severity_colors(self.palette())
+        target = self._target
+        self.badge_label.setStyleSheet(
+            f"color: {theme.badge_color(bool(target and target.is_fat32), self.palette())};"
+        )
+        if target is not None:
+            self.output_warning.setStyleSheet(
+                f"color: {colors.error if target.has_error else colors.warning};"
+            )
 
     def _estimate_bytes(self) -> int | None:
         """Rough output size: the mux adds little to the source streams."""

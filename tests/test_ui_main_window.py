@@ -26,6 +26,7 @@ from avchdforge.drives import Drive
 from avchdforge.selection import TrackSelection
 from avchdforge.settings import AppSettings, settings_for
 from avchdforge.tooling import FFMPEG, FFPROBE, TSMUXER, ToolInfo, ToolReport
+from avchdforge.ui import theme
 from avchdforge.ui.main_window import (
     MainWindow,
     drop_accepts,
@@ -725,6 +726,46 @@ def test_the_stage_text_stays_readable_on_a_dark_palette(tmp_path: Path, qapp) -
     try:
         # ``palette(mid)`` on Breeze-Dark-shaped colours: text == background.
         assert text_contrast(window.stage_label) > 3
+    finally:
+        qapp.setPalette(original)
+
+
+def test_the_badge_and_target_warning_stay_readable_on_a_dark_palette(
+    tmp_path: Path, qapp
+) -> None:
+    window, _runner, _source = prepared_window(tmp_path)
+    assert window.output_warning.text()
+
+    original = qapp.palette()
+    qapp.setPalette(dark_palette())
+    try:
+        qapp.processEvents()
+        colors = theme.severity_colors(qapp.palette())
+        assert window.badge_label.styleSheet() == f"color: {colors.muted};"
+        assert window.output_warning.styleSheet() == f"color: {colors.warning};"
+        assert text_contrast(window.badge_label) > 3
+        assert text_contrast(window.output_warning) > 3
+
+        window.set_drives(
+            [
+                Drive(
+                    device="/dev/sdb1",
+                    mountpoint=tmp_path,
+                    fstype="vfat",
+                    label="PS3USB",
+                    removable=True,
+                )
+            ]
+        )
+        qapp.processEvents()
+        assert window.badge_label.styleSheet() == f"color: {colors.ok};"
+        assert text_contrast(window.badge_label) > 3
+
+        (tmp_path / "out" / "BDMV").mkdir(parents=True)
+        window.set_output_dir(tmp_path / "out")
+        qapp.processEvents()
+        assert window.output_warning.styleSheet() == f"color: {colors.error};"
+        assert text_contrast(window.output_warning) > 3
     finally:
         qapp.setPalette(original)
 

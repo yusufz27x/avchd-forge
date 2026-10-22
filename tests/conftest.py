@@ -170,7 +170,9 @@ def dark_palette() -> Any:
 
     Real dark themes set ``Mid`` (a bevel colour) to the window colour, which is
     why a label coloured with ``palette(mid)`` disappears on them. The
-    placeholder is half-transparent window text, as dark themes do it.
+    placeholder is half-transparent window text, as dark themes do it. The
+    surface roles tables and buttons use (``Base``, ``AlternateBase``,
+    ``Button``) are set too, so rendering tests see a realistic dark widget.
     """
     from PySide6 import QtGui
 
@@ -178,7 +180,12 @@ def dark_palette() -> Any:
     palette.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor("#232629"))
     palette.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor("#eff0f1"))
     palette.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor("#2a2e32"))
+    palette.setColor(QtGui.QPalette.ColorRole.AlternateBase, QtGui.QColor("#31363b"))
     palette.setColor(QtGui.QPalette.ColorRole.Text, QtGui.QColor("#eff0f1"))
+    palette.setColor(QtGui.QPalette.ColorRole.Button, QtGui.QColor("#31363b"))
+    palette.setColor(QtGui.QPalette.ColorRole.ButtonText, QtGui.QColor("#eff0f1"))
+    palette.setColor(QtGui.QPalette.ColorRole.Highlight, QtGui.QColor("#3daee9"))
+    palette.setColor(QtGui.QPalette.ColorRole.HighlightedText, QtGui.QColor("#eff0f1"))
     palette.setColor(QtGui.QPalette.ColorRole.Mid, QtGui.QColor("#232627"))
     placeholder = QtGui.QColor("#eff0f1")
     placeholder.setAlpha(128)

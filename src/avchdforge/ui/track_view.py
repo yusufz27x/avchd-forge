@@ -36,13 +36,16 @@ from ..constants import MAX_H264_LEVEL, VIDEO_BITRATE_WARN_BPS
 from ..probe import AudioTrack, MediaInfo, SubtitleTrack, VideoTrack
 from ..selection import TrackSelection, default_selection
 from ..validate_types import Issue, ValidationReport
+from . import theme
 
-#: Row backgrounds: pale red for an error, pale orange for a warning.
-ERROR_BACKGROUND = QtGui.QColor(255, 232, 232)
-WARNING_BACKGROUND = QtGui.QColor(255, 246, 224)
-#: Text colours for the video pane (hex so they work on dark and light palettes).
-ERROR_COLOR = "#c0392b"
-WARNING_COLOR = "#9a6b00"
+#: Row backgrounds for the light palette. The widget derives dark ones from its
+#: own palette: pale tints under light text are what made warning rows illegible.
+ERROR_BACKGROUND = theme.LIGHT_ERROR_BACKGROUND
+WARNING_BACKGROUND = theme.LIGHT_WARNING_BACKGROUND
+#: Text colours for the light palette; :func:`video_html` also accepts the
+#: palette-aware set from :func:`theme.severity_colors`.
+ERROR_COLOR = theme.LIGHT_ERROR_TEXT
+WARNING_COLOR = theme.LIGHT_WARNING_TEXT
 
 #: The checkbox lives in the first column of both tables.
 CHECK_COLUMN = 0
@@ -134,15 +137,23 @@ def subtitle_rows(media: MediaInfo) -> tuple[TrackRow, ...]:
     return tuple(rows)
 
 
-def video_html(media: MediaInfo | None, report: ValidationReport | None = None) -> str:
+def video_html(
+    media: MediaInfo | None,
+    report: ValidationReport | None = None,
+    *,
+    colors: theme.SeverityColors | None = None,
+) -> str:
     """Rich-text summary of the source plus the validation findings.
 
     The colours are the point: a level above 4.1, an interlaced field order and
     a bitrate above what AVCHD likes are rendered in the warning colour right
-    next to the figure that caused them.
+    next to the figure that caused them. ``colors`` lets the widget pass the
+    set derived from its palette; without one the established light colours are
+    used, which keeps the pure renderer testable on its own.
     """
     if media is None:
         return ""
+    colors = colors or theme.LIGHT
     format_label = media.format_label or media.format_name or "unknown format"
     header = (
         f"<b>{escape(media.path.name)}</b> — {escape(format_label)}, "
@@ -150,41 +161,41 @@ def video_html(media: MediaInfo | None, report: ValidationReport | None = None) 
     )
     lines = [header]
     if media.videos:
-        lines.extend(_video_line(track) for track in media.videos)
+        lines.extend(_video_line(track, colors) for track in media.videos)
     else:
         lines.append("<i>no video stream</i>")
     if report is not None:
-        lines.extend(_issue_lines(report))
+        lines.extend(_issue_lines(report, colors))
     return "<br>".join(lines)
 
 
-def _video_line(track: VideoTrack) -> str:
+def _video_line(track: VideoTrack, colors: theme.SeverityColors) -> str:
     codec = " ".join(part for part in (track.codec.upper(), track.profile or "") if part)
     level = track.level_label
     if track.level is not None and track.level > MAX_H264_LEVEL:
-        level = _span(level, WARNING_COLOR)
+        level = _span(level, colors.warning)
     resolution = track.resolution_label
     if not track.is_progressive:
-        resolution = _span(resolution, WARNING_COLOR)
+        resolution = _span(resolution, colors.warning)
     fps = f"{track.fps:.3f} fps" if track.fps else "unknown fps"
     if track.bitrate:
         bitrate = f"{track.bitrate / 1_000_000:.1f} Mbps"
         if track.bitrate > VIDEO_BITRATE_WARN_BPS:
-            bitrate = _span(bitrate, WARNING_COLOR)
+            bitrate = _span(bitrate, colors.warning)
     else:
         bitrate = "unknown bitrate"
     return f"{codec} {level} {resolution} {fps} · {bitrate}"
 
 
-def _issue_lines(report: ValidationReport) -> list[str]:
+def _issue_lines(report: ValidationReport, colors: theme.SeverityColors) -> list[str]:
     return [
-        _span(f"{issue.code}: {escape(issue.message)}", _severity_color(issue))
+        _span(f"{issue.code}: {escape(issue.message)}", _severity_color(issue, colors))
         for issue in report.issues
     ]
 
 
-def _severity_color(issue: Issue) -> str:
-    return ERROR_COLOR if issue.is_error else WARNING_COLOR
+def _severity_color(issue: Issue, colors: theme.SeverityColors) -> str:
+    return colors.error if issue.is_error else colors.warning
 
 
 def _span(text: str, color: str) -> str:
@@ -269,7 +280,9 @@ class TrackView(QtWidgets.QWidget):
             chosen = selection if selection is not None else default_selection(media)
             self._populate(self.audio_table, audio_rows(media), chosen.audio)
             self._populate(self.subtitle_table, subtitle_rows(media), chosen.subtitles)
-            self.video_label.setText(video_html(media, self._report))
+            self.video_label.setText(
+                video_html(media, self._report, colors=self._colors())
+            )
 
     def set_report(self, report: ValidationReport) -> None:
         """Recolour the rows and re-render the findings after a re-validation."""
@@ -277,9 +290,31 @@ class TrackView(QtWidgets.QWidget):
         if self._media is None:
             return
         with _frozen(self):
-            self.video_label.setText(video_html(self._media, report))
+            self.video_label.setText(
+                video_html(self._media, report, colors=self._colors())
+            )
             for table in (self.audio_table, self.subtitle_table):
                 self._paint(table)
+
+    def changeEvent(self, event: QtCore.QEvent) -> None:
+        """Re-derive the explicit colours when the application palette changes."""
+        super().changeEvent(event)
+        if event.type() not in (
+            QtCore.QEvent.Type.PaletteChange,
+            QtCore.QEvent.Type.StyleChange,
+        ):
+            return
+        if not hasattr(self, "audio_table"):  # pragma: no cover - during construction
+            return
+        if self._media is not None:
+            self.video_label.setText(
+                video_html(self._media, self._report, colors=self._colors())
+            )
+        for table in (self.audio_table, self.subtitle_table):
+            self._paint(table)
+
+    def _colors(self) -> theme.SeverityColors:
+        return theme.severity_colors(self.palette())
 
     def selection(self) -> TrackSelection:
         """The current checkbox state, as the core expects it."""
@@ -378,6 +413,7 @@ class TrackView(QtWidgets.QWidget):
 
     def _paint(self, table: QtWidgets.QTableWidget) -> None:
         """Row colour + tooltip from the report and the row's own reason."""
+        colors = self._colors()
         for row in range(table.rowCount()):
             box = table.item(row, CHECK_COLUMN)
             if box is None:  # pragma: no cover - every row gets one in _populate
@@ -391,7 +427,7 @@ class TrackView(QtWidgets.QWidget):
                 )
                 if part
             )
-            background = _row_background(issues)
+            background = _row_background(issues, colors)
             for column in range(table.columnCount()):
                 item = table.item(row, column)
                 if item is None:  # pragma: no cover - defensive
@@ -450,11 +486,13 @@ def _checked(table: QtWidgets.QTableWidget) -> tuple[int, ...]:
     return tuple(sorted(found))
 
 
-def _row_background(issues: tuple[Issue, ...]) -> QtGui.QBrush:
+def _row_background(
+    issues: tuple[Issue, ...], colors: theme.SeverityColors
+) -> QtGui.QBrush:
     if any(issue.is_error for issue in issues):
-        return QtGui.QBrush(ERROR_BACKGROUND)
+        return QtGui.QBrush(colors.error_background)
     if issues:
-        return QtGui.QBrush(WARNING_BACKGROUND)
+        return QtGui.QBrush(colors.warning_background)
     return QtGui.QBrush()
 
 

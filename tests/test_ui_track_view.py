@@ -17,7 +17,10 @@ pytest.importorskip("pytestqt", reason="the ui tests use pytest-qt")
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6 import QtCore, QtGui
+
 from avchdforge.selection import TrackSelection, default_selection
+from avchdforge.ui import theme
 from avchdforge.ui.track_view import (
     ERROR_BACKGROUND,
     ERROR_COLOR,
@@ -31,7 +34,7 @@ from avchdforge.ui.track_view import (
 )
 from avchdforge.validate_types import ValidationReport, error, warning
 
-from .conftest import astream, build_media, sstream, vstream
+from .conftest import astream, build_media, dark_palette, sstream, vstream
 
 pytestmark = pytest.mark.usefixtures("qapp")
 
@@ -177,6 +180,18 @@ def test_video_html_renders_findings_with_severity_colours() -> None:
     assert f'color:{WARNING_COLOR};' in html and "V8: High bitrate" in html
 
 
+def test_video_html_uses_palette_aware_colours(qapp) -> None:
+    colors = theme.severity_colors(dark_palette())
+    report = ValidationReport((error("V3", "Not H.264"), warning("V8", "High bitrate")))
+
+    html = video_html(mixed_media(), report, colors=colors)
+
+    assert f"color:{colors.error};" in html and "V3: Not H.264" in html
+    assert f"color:{colors.warning};" in html and "V8: High bitrate" in html
+    assert f"color:{ERROR_COLOR};" not in html
+    assert f"color:{WARNING_COLOR};" not in html
+
+
 def test_video_html_escapes_the_file_name() -> None:
     media = build_media([vstream(0)], path="odd & <name>.mkv")
 
@@ -313,6 +328,74 @@ def test_set_report_paints_warnings_differently() -> None:
     row = view.row_for("subtitle", 3)
     assert row is not None
     assert view.subtitle_table.item(row, 2).background().color() == WARNING_BACKGROUND
+
+
+def test_rows_and_the_video_summary_follow_a_dark_palette(qapp) -> None:
+    original = qapp.palette()
+    qapp.setPalette(dark_palette())
+    try:
+        view = TrackView()
+        view.set_media(mixed_media())
+        view.set_report(
+            ValidationReport(
+                (warning("V10", "AAC warning", 1), error("V12", "No core", 2))
+            )
+        )
+        qapp.processEvents()
+
+        colors = theme.severity_colors(qapp.palette())
+        error_row = view.row_for("audio", 2)
+        warning_row = view.row_for("audio", 1)
+        assert error_row is not None and warning_row is not None
+        error_background = view.audio_table.item(error_row, 2).background().color()
+        warning_background = view.audio_table.item(warning_row, 2).background().color()
+        assert error_background == colors.error_background
+        assert warning_background == colors.warning_background
+        assert error_background.lightness() < 128
+        text = qapp.palette().color(QtGui.QPalette.ColorRole.Text)
+        for background in (error_background, warning_background):
+            assert theme.contrast_ratio(text, background) >= theme.MIN_CONTRAST
+        assert f"color:{colors.error};" in view.video_label.text()
+        assert f"color:{colors.warning};" in view.video_label.text()
+    finally:
+        qapp.setPalette(original)
+
+
+def test_a_palette_change_repaints_existing_rows_and_findings(qapp) -> None:
+    original = qapp.palette()
+    view = TrackView()
+    view.set_media(mixed_media())
+    view.set_report(ValidationReport((error("V12", "No core", 2),)))
+    row = view.row_for("audio", 2)
+    assert row is not None
+    assert view.audio_table.item(row, 2).background().color() == ERROR_BACKGROUND
+
+    qapp.setPalette(dark_palette())
+    try:
+        qapp.processEvents()
+        colors = theme.severity_colors(qapp.palette())
+        assert view.audio_table.item(row, 2).background().color() == (
+            colors.error_background
+        )
+        assert f"color:{colors.error};" in view.video_label.text()
+    finally:
+        qapp.setPalette(original)
+
+
+def test_a_new_report_clears_a_previous_row_tint() -> None:
+    view = TrackView()
+    view.set_media(mixed_media())
+    row = view.row_for("audio", 2)
+    assert row is not None
+    view.set_report(ValidationReport((error("V12", "No core", 2),)))
+    assert view.audio_table.item(row, 2).background().color() == ERROR_BACKGROUND
+
+    view.set_report(ValidationReport())
+
+    assert (
+        view.audio_table.item(row, 2).background().style()
+        == QtCore.Qt.BrushStyle.NoBrush
+    )
 
 
 def test_set_media_none_clears_everything() -> None:
