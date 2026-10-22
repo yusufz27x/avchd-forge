@@ -246,8 +246,13 @@ names, so a second run into the same folder would overwrite the first title.
 * **Tracks**: three panes — video info (read-only, level/bitrate flags rendered as
   coloured text), audio table with checkboxes, subtitle table with checkboxes.
   Incompatible rows are disabled with tooltip text; text-subtitle rows show
-  "→ PGS (converted)". Defaults: first *compatible* audio on, all PGS on, text subs
-  off, forced-subs column surfaced.
+  "→ PGS (converted)". Defaults: without a language priority, the first
+  *compatible* audio track and all PGS tracks are on, text subs off; with one,
+  every compatible audio and every supported subtitle track in the preferred
+  languages is on (PGS or convertible text). An unmatched audio preference still
+  ticks one track (the source default, else the first compatible one, because V9
+  needs audio); an unmatched subtitle preference ticks none. Forced-subs column
+  surfaced.
 * **Log**: dockable/collapsible pane (`QToolButton` toggle, state persisted) with
   monospace output, `Command:` lines highlighted, auto-scroll with a pause toggle,
   "Save log…" and "Copy" actions.

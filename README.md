@@ -95,10 +95,12 @@ folder, and the source can also be dragged onto the window.
   log shows the raw `ffprobe` JSON.
 * **Tracks** — the video pane shows codec/level/resolution/bitrate with
   incompatible values highlighted; audio and subtitle tables have checkboxes.
-  Defaults: the first compatible audio track is ticked, PGS subtitles are
-  ticked, text subtitles are off (they cost a conversion pass), forced-subtitle
-  flags are shown per row. Incompatible rows are disabled and explain why in
-  their tooltip.
+  Defaults: the first compatible audio track is ticked and every PGS subtitle is
+  ticked; text subtitles are off (they cost a conversion pass). When preferred
+  languages are set in Preferences, the rule changes to *all* compatible audio
+  tracks and *all* supported subtitle tracks in those languages (convertible
+  text included), with nothing outside them ticked. Forced-subtitle flags are
+  shown per row. Incompatible rows are disabled and explain why in their tooltip.
 * **Output** — pick a folder or a detected removable drive from the combo. The
   badge shows `FAT32`, `exFAT`, `NTFS`, … and inline warnings tell you when the
   split setting and the filesystem disagree (V15) or when the estimate may not
@@ -115,8 +117,9 @@ folder, and the source can also be dragged onto the window.
   toolbar.
 * **Preferences** (*Tools ▸ Preferences…*, also via the startup gate) — tool
   paths with a *Check now* probe of the installed versions, output/temp folder,
-  split size, subtitle font, and audio/subtitle language priorities that drive
-  the default tick marks. Nothing is adopted until you press OK.
+  split size, subtitle font, and audio/subtitle language priorities that decide
+  which tracks are ticked by default (every track in those languages, not just
+  the first match). Nothing is adopted until you press OK.
 
 ## What the PS3 accepts (compatibility rules)
 

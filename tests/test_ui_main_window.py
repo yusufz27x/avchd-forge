@@ -424,6 +424,22 @@ def test_the_language_priority_from_preferences_picks_the_audio_default(
     assert window.track_view.selection() == TrackSelection(audio=(2,))
 
 
+def test_preferences_tick_every_audio_track_in_the_preferred_languages(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner()
+    script_probe(runner)
+    settings = AppSettings(settings_for(tmp_path / "prefs.ini"))
+    settings.set_audio_priority("jpn, eng")
+    window = MainWindow(settings=settings, runner_factory=lambda: runner)
+    window.set_tool_report(fake_tools(tmp_path))
+
+    window.open_source(write_source(tmp_path))
+
+    # Both are preferred; the view reports them in stream order.
+    assert window.track_view.selection() == TrackSelection(audio=(1, 2))
+
+
 def test_unchecking_every_audio_track_blocks_start_again(tmp_path: Path) -> None:
     window, _runner, _source = prepared_window(tmp_path)
     assert window.start_button.isEnabled()

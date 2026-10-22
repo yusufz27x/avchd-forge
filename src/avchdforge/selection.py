@@ -2,11 +2,17 @@
 
 The rules from the brief:
 
-* audio — the first *compatible* track is on, every other audio track is off;
-  when the user configured a language priority, the first compatible track in
-  that order wins;
-* subtitles — every PGS track is on, text subtitles start off (they need a
-  conversion step, so switching one on is a deliberate act).
+* audio — without a language priority, the first *compatible* track is on and
+  every other audio track is off; with one, every compatible track whose
+  language is preferred is on (at least one track is always required);
+* subtitles — without a language priority, every PGS track is on and text
+  subtitles start off (they need a conversion step, so switching one on is a
+  deliberate act); with one, every supported track in the preferred languages is
+  on, PGS and convertible text alike.
+
+A priority that matches nothing leaves the audio fallback in place (the source's
+default-flagged track, else the first compatible one) and selects no subtitles:
+the preference is a language decision, not a suggestion to tick everything.
 
 Track sets are immutable: the UI produces a new :class:`TrackSelection` instead
 of mutating the current one, which keeps undo/re-run logic and tests trivial.
@@ -57,26 +63,32 @@ def _toggle(values: tuple[int, ...], index: int) -> tuple[int, ...]:
     return (*values, index)
 
 
+def _normalized_priority(language_priority: Sequence[str]) -> list[str]:
+    return [entry.strip().lower() for entry in language_priority if entry.strip()]
+
+
 def _priority_rank(language: str, priority: Sequence[str]) -> int:
-    """Lower is better; languages outside the priority list come last."""
-    normalized = [entry.strip().lower() for entry in priority if entry.strip()]
+    """Lower is better; languages outside the (normalised) priority list come last."""
     try:
-        return normalized.index(language.lower())
+        return priority.index(language.lower())
     except ValueError:
-        return len(normalized)
+        return len(priority)
 
 
-def default_audio_index(
+def default_audio_indices(
     media: MediaInfo,
     *,
     language_priority: Sequence[str] = (),
     decisions: dict[int, AudioDecision] | None = None,
-) -> int | None:
-    """Pick the audio track that should be enabled by default.
+) -> tuple[int, ...]:
+    """Pick the audio tracks that should be enabled by default.
 
-    Order of preference: languages from the user's priority list (in that order),
-    then a track the source marked as default, then plain stream order. Tracks the
-    pipeline cannot use (for example TrueHD without an AC-3 core) never win.
+    With a language priority, every compatible track in those languages is on,
+    ordered by the priority, then the source's default flag, then stream order.
+    Without one — or when nothing matches — a single track is chosen, because
+    the disc needs at least one: the source's default-flagged track, else the
+    first compatible one. Tracks the pipeline cannot use (for example TrueHD
+    without an AC-3 core) never win.
     """
     decisions = decisions if decisions is not None else _decisions(media)
     candidates = [
@@ -85,9 +97,9 @@ def default_audio_index(
         if (decision := decisions.get(track.index)) is not None and decision.supported
     ]
     if not candidates:
-        return None
+        return ()
 
-    priority = [entry.strip().lower() for entry in language_priority if entry.strip()]
+    priority = _normalized_priority(language_priority)
     if priority:
         preferred = [
             track
@@ -95,22 +107,33 @@ def default_audio_index(
             if _priority_rank(track.language, priority) < len(priority)
         ]
         if preferred:
-            # Only the best-priority language group competes; the default flag is a
-            # tie-break inside that group, never a way to jump the queue.
-            best = min(_priority_rank(track.language, priority) for track in preferred)
-            group = sorted(
-                (track for track in preferred if _priority_rank(track.language, priority) == best),
-                key=lambda track: track.index,
+            ordered = sorted(
+                preferred,
+                key=lambda track: (
+                    _priority_rank(track.language, priority),
+                    not track.is_default,
+                    track.index,
+                ),
             )
-            for track in group:
-                if track.is_default:
-                    return track.index
-            return group[0].index
+            return tuple(track.index for track in ordered)
 
     for track in candidates:
         if track.is_default:
-            return track.index
-    return candidates[0].index
+            return (track.index,)
+    return (candidates[0].index,)
+
+
+def default_audio_index(
+    media: MediaInfo,
+    *,
+    language_priority: Sequence[str] = (),
+    decisions: dict[int, AudioDecision] | None = None,
+) -> int | None:
+    """The first track :func:`default_audio_indices` would enable, if any."""
+    indices = default_audio_indices(
+        media, language_priority=language_priority, decisions=decisions
+    )
+    return indices[0] if indices else None
 
 
 def default_selection(
@@ -126,29 +149,38 @@ def default_selection(
     audio_priority = audio_language_priority or language_priority
     decisions = decisions if decisions is not None else _decisions(media)
 
-    audio_index = default_audio_index(
+    audio = default_audio_indices(
         media, language_priority=audio_priority, decisions=decisions
     )
-    subtitles = _default_subtitles(media, subtitle_language_priority)
-    return TrackSelection(
-        audio=(audio_index,) if audio_index is not None else (),
-        subtitles=subtitles,
+    subtitles = default_subtitle_indices(
+        media, language_priority=subtitle_language_priority
     )
+    return TrackSelection(audio=audio, subtitles=subtitles)
 
 
-def _default_subtitles(
-    media: MediaInfo, language_priority: Sequence[str]
+def default_subtitle_indices(
+    media: MediaInfo, *, language_priority: Sequence[str] = ()
 ) -> tuple[int, ...]:
-    pgs = [track for track in media.subtitles if track.is_pgs]
-    if not pgs:
-        return ()
-    priority = [entry.strip().lower() for entry in language_priority if entry.strip()]
-    if priority:
-        ranked = sorted(
-            pgs, key=lambda track: (_priority_rank(track.language, priority), track.index)
-        )
-        return tuple(track.index for track in ranked)
-    return tuple(track.index for track in pgs)
+    """Pick the subtitle tracks that should be enabled by default.
+
+    With a language priority, every supported track in those languages is on —
+    PGS is copied, text is converted — and nothing else. Without one, all PGS
+    tracks are on and text tracks stay off (converting one is a deliberate act).
+    """
+    priority = _normalized_priority(language_priority)
+    if not priority:
+        return tuple(track.index for track in media.subtitles if track.is_pgs)
+    preferred = [
+        track
+        for track in media.subtitles
+        if track.is_supported
+        and _priority_rank(track.language, priority) < len(priority)
+    ]
+    ranked = sorted(
+        preferred,
+        key=lambda track: (_priority_rank(track.language, priority), track.index),
+    )
+    return tuple(track.index for track in ranked)
 
 
 def compatible_audio_indices(
@@ -218,7 +250,9 @@ __all__ = [
     "TrackSelection",
     "compatible_audio_indices",
     "default_audio_index",
+    "default_audio_indices",
     "default_selection",
+    "default_subtitle_indices",
     "describe_selection",
     "sanitize_selection",
     "selectable_subtitle_indices",

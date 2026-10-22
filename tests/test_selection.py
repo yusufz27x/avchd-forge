@@ -9,7 +9,9 @@ from avchdforge.selection import (
     TrackSelection,
     compatible_audio_indices,
     default_audio_index,
+    default_audio_indices,
     default_selection,
+    default_subtitle_indices,
     describe_selection,
     sanitize_selection,
     selectable_subtitle_indices,
@@ -89,8 +91,30 @@ def test_default_audio_respects_language_priority(ac3_media):
     assert default_audio_index(ac3_media, language_priority=["eng", "jpn"]) == 1
 
 
+def test_default_audio_turns_on_every_track_in_the_preferred_languages(ac3_media):
+    # Track 2 is jpn, track 1 is eng (and flagged default). Both languages are
+    # preferred, so both tracks are on, in priority order.
+    assert default_audio_indices(ac3_media, language_priority=["jpn", "eng"]) == (2, 1)
+    assert default_audio_indices(ac3_media, language_priority=["eng", "jpn"]) == (1, 2)
+    assert default_selection(
+        ac3_media, audio_language_priority=["jpn", "eng"]
+    ).audio == (2, 1)
+
+
+def test_default_audio_orders_same_language_tracks_by_the_default_flag():
+    media = build_media(
+        [
+            vstream(),
+            astream(1, "ac3", channels=2, tags={"language": "eng"}),
+            astream(2, "ac3", channels=6, disposition={"default": 1}, tags={"language": "eng"}),
+        ]
+    )
+    assert default_audio_indices(media, language_priority=["eng"]) == (2, 1)
+
+
 def test_default_audio_ignores_priority_that_matches_nothing(ac3_media):
     assert default_audio_index(ac3_media, language_priority=["ger"]) == 1
+    assert default_audio_indices(ac3_media, language_priority=["ger"]) == (1,)
 
 
 def test_default_audio_skips_unsupported_tracks():
@@ -103,6 +127,7 @@ def test_default_audio_skips_unsupported_tracks():
     )
     assert default_audio_index(media) == 2
     assert default_audio_index(media, language_priority=["eng"]) == 2
+    assert default_audio_indices(media, language_priority=["eng"]) == (2,)
 
 
 def test_default_audio_prefers_default_flag_within_a_language():
@@ -139,7 +164,30 @@ def test_default_subtitles_follow_language_priority():
         ]
     )
     assert default_selection(media).subtitles == (2, 3, 4)
-    assert default_selection(media, subtitle_language_priority=["jpn"]).subtitles == (3, 4, 2)
+    assert default_selection(media, subtitle_language_priority=["jpn"]).subtitles == (3, 4)
+    assert default_selection(
+        media, subtitle_language_priority=["jpn", "eng"]
+    ).subtitles == (3, 4, 2)
+
+
+def test_default_subtitles_include_convertible_text_in_preferred_languages():
+    media = build_media(
+        [
+            vstream(),
+            astream(1, "ac3"),
+            sstream(2, "hdmv_pgs_subtitle", tags={"language": "eng"}),
+            sstream(3, "subrip", tags={"language": "eng"}),
+            sstream(4, "subrip", tags={"language": "jpn"}),
+            sstream(5, "dvd_subtitle", tags={"language": "eng"}),
+        ]
+    )
+    # PGS and text both count as acceptable; DVD subtitles do not.
+    assert default_subtitle_indices(media, language_priority=["eng"]) == (2, 3)
+    assert default_subtitle_indices(media, language_priority=["jpn"]) == (4,)
+    assert default_subtitle_indices(media) == (2,), "text stays off without a priority"
+    assert default_subtitle_indices(media, language_priority=["ger"]) == (), (
+        "a preference that matches nothing selects no subtitles"
+    )
 
 
 def test_language_priority_alias_still_works(ac3_media):
